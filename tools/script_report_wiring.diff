@@ -1,0 +1,89 @@
+--- a/src/app/App.h	2026-10-04 01:16:07
++++ b/src/app/App.h	2026-10-04 01:16:07
+@@ -44,6 +44,8 @@
+     std::string vehicle = "ZilR"; // vehicle model container in COMMON/TRUCKS.B3D
+     bool allTiles = true;         // merge every ENV tile into the world
+     bool scripts = false;        // --scripts: decrypt+parse every script, print a report
++    bool scriptReport = false;   // --script-report: the recovered rule coverage
++    bool scriptCoverage = false; // --script-coverage: also dump the (form, field) table
+     std::string scriptDump;      // --script-dump FILE: write the decrypted text to stdout
+     bool listVehicles = false;   // --vehicles: print the catalogue from evehicles.sch
+     std::string hideMat;         // --hide-mat PREFIX: skip world submeshes by material
+--- a/src/app/App.cpp	2026-10-04 01:16:07
++++ b/src/app/App.cpp	2026-10-04 01:16:07
+@@ -403,6 +403,45 @@
+         (void)f;
+         return true;
+     }
++    if (opt_.scriptReport) {
++        // The recovered engine rules of src/script/ScriptRules.{h,cpp}: the four
++        // `people` condition kinds, the node-event direction/8 s guard, the
++        // obstacle and ambush activation bands and the restable tuning table.
++        GameData gd;
++        gd.load(opt_.dataDir);
++        ScriptRuntime rt(gd);
++        std::vector<ScriptNodePos> nodes;                 // name -> (x, z) of ENV/*.way
++        DIR* dp = opendir((opt_.dataDir + "/ENV").c_str());
++        if (dp) {
++            std::vector<std::string> ways;
++            while (struct dirent* e = readdir(dp)) {
++                std::string n = e->d_name;
++                if (n.size() > 4 && n.compare(n.size() - 4, 4, ".way") == 0)
++                    ways.push_back(opt_.dataDir + "/ENV/" + n);
++            }
++            closedir(dp);
++            std::sort(ways.begin(), ways.end());
++            for (const auto& p : ways) {
++                Way w;
++                if (!w.load(p)) continue;
++                for (const auto& room : w.rooms)
++                    for (const auto& nd : room.nodes)
++                        if (!nd.name.empty()) nodes.push_back({nd.name, nd.pos.x, nd.pos.z});
++            }
++        }
++        rt.setNodePositions(nodes);
++        ScriptWorldState st;
++        st.hour = opt_.startHour;                        // --hour (default 12)
++        st.weather = 0.0f;                               // clear; see ScriptWorldState
++        st.money = 45000;
++        st.damage = 0.0f;
++        st.time = 1000.0;
++        rt.update(st);
++        LOG("%s", rt.reportText().c_str());
++        if (opt_.scriptCoverage)
++            for (const auto& l : {rt.coverageTable()}) LOG("%s", l.c_str());
++        return true;
++    }
+     if (opt_.b3dinfo) {
+         const char* files[] = {"/MENV/dr.b3d", "/ENV/aa.b3d", "/MTR/tr.b3d", "/COMMON/TRUCKS.B3D"};
+         for (const char* f : files) {
+--- a/src/main.cpp	2026-10-04 01:16:07
++++ b/src/main.cpp	2026-10-04 01:16:07
+@@ -27,6 +27,8 @@
+     "  --terrain         draw the M0 terrain*.raw mesh (wrong heights, debug only)\n"
+     "  --autostart       start in the world as if SINGLE PLAYER was chosen\n"
+     "  --scripts         decrypt+parse every .sch/.CNF and print a report, exit\n"
++  "  --script-report   print the script-rule coverage (active/satisfied/fired), exit\n"
++  "  --script-coverage with --script-report: also dump the (form, field) table\n"
+     "  --script-dump F   write the decrypted text of F to stdout, exit\n"
+     "  --vehicles        list the vehicle catalogue read from evehicles.sch\n"
+     "  --probe x,z[,r]   list the world submeshes near a world position\n"
+@@ -106,6 +108,8 @@
+         else if (argIs(argv[i], "--world-b3d")) o.worldB3d = true;
+         else if (argIs(argv[i], "--autostart")) o.autostart = true;
+         else if (argIs(argv[i], "--scripts")) o.scripts = true;
++        else if (argIs(argv[i], "--script-report")) o.scriptReport = true;
++        else if (argIs(argv[i], "--script-coverage")) { o.scriptReport = true; o.scriptCoverage = true; }
+         else if (argIs(argv[i], "--script-dump") && i + 1 < argc) o.scriptDump = argv[++i];
+         else if (argIs(argv[i], "--vehicles")) o.listVehicles = true;
+         else if (argIs(argv[i], "--view") && i + 1 < argc) o.view = argv[++i];
+--- a/CMakeLists.txt	2026-10-04 01:16:07
++++ b/CMakeLists.txt	2026-10-04 01:16:07
+@@ -30,6 +30,7 @@
+     src/script/Sdte.cpp
+     src/script/Sexp.cpp
+     src/script/GameData.cpp
++    src/script/ScriptRules.cpp
+     src/gfx/Renderer.cpp
+     src/gfx/Mirror.cpp
+     src/res/Res.cpp

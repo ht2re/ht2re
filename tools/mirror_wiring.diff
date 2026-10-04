@@ -1,0 +1,60 @@
+--- a/src/app/App.h
++++ b/src/app/App.h
+@@ -17,6 +17,7 @@
+ #include "../game/Traffic.h"
+ #include "../game/Collision.h"
+ #include "../game/Cockpit.h"
++#include "../gfx/Mirror.h"
+ #include "../audio/Audio.h"
+ #include "Input.h"
+ #include "../ui/Hud.h"
+@@ -257,6 +258,7 @@
+     SceneTextures menuTex_, worldTex_, vehicleTex_;
+     Vehicle vehicle3d_;
+     Cockpit cockpit_;           // 3D instruments from COMMON/CABINES.B3D
++    Mirror mirror_;             // rear-view mirror (COMMON/esc16.RES + FBO)
+     GameData gameData_;
+     B3D parked_;               // COMMON/TRUCKS.B3D, reused to place parked cars
+     B3D trafficB3d_;           // COMMON/TRUCKS.B3D, reused for the AI models
+--- a/src/app/App.cpp
++++ b/src/app/App.cpp
+@@ -94,6 +94,9 @@
+             vehicleTex_.load(r_, opt_.dataDir + "/COMMON/TRUCKS");
+             r_.setVehicleScene(&trucks_, &vehicleTex_);
+             cockpit_.load(r_, opt_.dataDir, opt_.vehicle);   // COMMON/CABINES.B3D
++            // Rear-view mirror art (COMMON/esc16.RES mirr*.msk) + reflection
++            // target; a no-op (and no per-frame cost) when the art is missing.
++            mirror_.load(r_, opt_.dataDir, &trucks_.anchorList, opt_.vehicle);
+         }
+         indexWayNodes();
+         buildMinimapTexture();
+@@ -936,6 +939,7 @@
+     }
+     r_.setVehicleScene(&trucks_, &vehicleTex_);
+     cockpit_.load(r_, opt_.dataDir, model);      // rebind the instruments (no-op if same brand)
++    mirror_.load(r_, opt_.dataDir, &trucks_.anchorList, model);   // rebind the mirror mount
+     vehicle3d_.reset(vehicle3d_.x(), vehicle3d_.z(), vehicle3d_.yaw());
+     opt_.vehicle = model;
+     LOG("economy: player vehicle is now '%s' (%zu submeshes)", model.c_str(),
+@@ -2083,6 +2087,9 @@
+         // The 3D cockpit instruments live in COMMON/CABINES.B3D (docs/cockpit.md);
+         // Cockpit is a no-op when the file or the model's cab is missing.
+         cockpit_.load(r_, opt_.dataDir, opt_.vehicle);
++        // Rear-view mirror: the original's <Brand>SLRSpace mount defines the
++        // reflection camera (docs/mirror.md).
++        mirror_.load(r_, opt_.dataDir, &trucks_.anchorList, opt_.vehicle);
+     }
+     vehicle3d_.setGround(&ground_);
+     vehicle3d_.reset(spawn_[0], spawn_[1], spawn_[2]);
+@@ -2329,6 +2336,11 @@
+         // and only from the deterministic vehicle state (speed/rpm/fuel).
+         cockpit_.setVisible(viewMode_ == 1);
+         cockpit_.draw(r_, vehicle3d_.modelMatrix(), vehicle3d_, cx, cy, cz, camYaw, camPitch);
++        // Rear-view mirror (src/gfx/Mirror.cpp): re-renders the world from the
++        // mirror mount into an offscreen target and blits it under the original
++        // mirr*.msk frame.  Cockpit view only; one call, before the HUD's 2D pass.
++        mirror_.setVisible(viewMode_ == 1);
++        mirror_.draw(r_, vehicle3d_.modelMatrix());
+         r_.setNearPlane(2.0f);
+     }
+     if (haveTrucks_ && opt_.camGiven) {

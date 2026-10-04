@@ -1,0 +1,168 @@
+# HT2:RE — in the repository go ONLY the sources and the documentation.
+# Everything below is either produced locally or is third-party game data.
+
+# ---------------------------------------------------------------- build output
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.app/
+*.dSYM/
+core
+core.*
+
+# ------------------------------------------------- third-party game assets/data
+# The retail Hard Truck 2 data (637 MB): needed to RUN the engine, never ours to
+# publish.  Point the engine at your own copy with `--data DIR`.
+original/
+king.exe
+*.RES
+*.res
+*.b3d
+*.B3D
+*.way
+*.sch
+*.CNF
+*.cnf
+*.tech
+*.txr
+*.msk
+*.fon
+*.FON
+*.SFT
+*.plm
+*.raw
+*.ini
+*.INI
+MUSIC/
+ENV/
+MTR/
+MENV/
+COMMON/
+SAVE/
+# decrypted scripts written by tools/decrypt_sch.py
+decrypted/
+
+# ------------------------------------------------------- evidence / generated
+# Screenshots, side-by-side comparisons, reference frames, decoded art dumps.
+shots/
+shot.bmp
+*.bmp
+*.rvid          # transcoded movies (build/media)
+*.wav
+*.mp3
+*.avi
+tools/out/
+*.log
+
+# -------------------------------------------------- patch / merge leftovers
+# `patch -p1` and `git apply` drop these next to the file they edited.
+*.orig
+*.rej
+*.bak
+
+# ------------------------------------------------------------------- python/IDE
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# ------------------------------------------------------------- editors / system
+.DS_Store
+._*
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cache/
+.clangd/
+
+# ------------------------------------------------------------- local run state
+savegame.txt
+HT2_SAVE_FILE
+### C++
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Linker files
+*.ilk
+
+# Debugger Files
+*.pdb
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+*.so.*
+
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Build directories
+build/
+Build/
+build-*/
+
+# CMake generated files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+install_manifest.txt
+compile_commands.json
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+*.swp
+
+# vcpkg
+vcpkg_installed/
+
+# debug information files
+*.dwo
+
+# test output & cache
+Testing/
+.cache/
+
