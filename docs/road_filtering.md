@@ -1,5 +1,14 @@
 # Road texture shimmer on curves ("текстура дороги дребезжит")
 
+Repeat check 2026-10-05: this document's original filtering fix does not prove
+that the later user report is resolved. On the standard pose at 8x anisotropy,
+identical-camera renders still differ in 0 pixels; after 0.02deg yaw movement,
+1.51% of 235013 selected road pixels change by >8/255. MAE versus the 4x
+supersampled frame is 0.8716/255. Residual temporal aliasing is nonzero.
+Separate physics fixes (pure contact-height queries, authored asphalt priority,
+height-aware collision and water-under-bridge handling) are documented in
+`engine_discrepancies.md`; the exact repeat-report location remains required.
+
 Investigation and fix for the reported grazing-angle shimmer of the shipped B3D
 road textures.  Everything below was measured on the machine that filed the bug
 (Apple M4, `GL_RENDERER` = `Apple M4`, `GL_VERSION` = `4.1 Metal - 90.5`).

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Build and run the audio harness (tools/audio_test.cpp) plus the shipped-data
 # probe (tools/audio_probe.py).
 #
@@ -8,7 +8,7 @@
 # The harness links only Audio.cpp + Res.cpp - it does not need the rest of the
 # game to compile (useful while other modules are being edited) - and forces
 # SDL_AUDIODRIVER=dummy, so it runs headless.
-set -e
+set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p tools/out
 
@@ -19,6 +19,7 @@ c++ -std=c++17 -O1 -I src -DHT2_HAVE_SDL_MIXER=1 -o tools/out/audio_test \
 
 echo "== tools/out/audio_test original (SDL_AUDIODRIVER=dummy)"
 ./tools/out/audio_test original | tee tools/out/audio_test.log
+if grep -q '^FAIL' tools/out/audio_test.log; then exit 1; fi
 
 n=$(grep -c "unknown sound 'definitely_not_a_sound'" tools/out/audio_test.log || true)
 echo "== missing-sound log lines: $n (expected 1: play() x2 + playGlobal() x1, logged once)"

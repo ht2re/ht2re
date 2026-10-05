@@ -281,11 +281,8 @@ bool RoadSurface::heightAt(float x, float z, float ref, float maxDist,
     const float tol = 12.0f;
     float nearY = 0.0f, anyY = 0.0f;
     float nearD = tol, anyD = 1e30f;
-    // The wide fallback is culled to `maxDist` horizontally (the caller's search
-    // radius): without it a surface tens of metres away in the same column (a
-    // ground-level asphalt quad far below a road at y = 20) is accepted just for
-    // being the closest one, and the ride drops to it.
-    const float cull = maxDist * maxDist;
+    // maxDist bounds the bucket search horizontally; actual hits still require
+    // triangle containment. The fallback has a separate vertical limit below.
     bool got = false;
     float topY = -1e30f;
     int x0 = (int)((x - maxDist - g.minX) / g.cell);
@@ -312,18 +309,21 @@ bool RoadSurface::heightAt(float x, float z, float ref, float maxDist,
                 if (y > topY) topY = y;
                 const float d = std::fabs(y - ref);
                 if (d < nearD) { nearD = d; nearY = y; got = true; }
-                if (d < anyD && d <= cull) { anyD = d; anyY = y; }
+                if (d < anyD) { anyD = d; anyY = y; }
             }
         }
-    if (!got) return false;
-    // Horizontal distance to the nearest road triangle: a surface whose *column*
-    // is close in height but whose geometry is tens of metres away (a
-    // ground-level asphalt quad picked up as the road under a viaduct at y = 20)
-    // is not the surface under the query point.
-    const float hd = nearestEdgeDist(x, z, maxDist);
-    if (hd > maxDist) return false;
+    // A spawn reference may be on the terrain cut rather than the road. Keep
+    // the fallback bounded vertically; maxDist is horizontal, never squared
+    // into a height threshold.
+    if (!got) {
+        if (anyD > 20.0f) return false;
+        nearY = anyY;
+    }
+    // Barycentric containment above already proves horizontal distance ZERO.
+    // Distance to an edge is not distance to a filled triangle: on a wide
+    // apron it previously rejected its centre or blended it with terrain.
     outY = nearY;
-    outDist = hd;
+    outDist = 0.0f;
     outVisible = !(topY > outY + 1.0f);
     return true;
 }

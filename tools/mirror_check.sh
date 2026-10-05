@@ -9,7 +9,7 @@
 # through exactly the code the game ships.  tools/mirror_check.py reads the four
 # BMPs the harness writes and asserts the mirror region behaviour; the harness
 # prints the cost numbers.
-set -e
+set -euo pipefail
 cd "$(dirname "$0")/.."
 FRAMES=${1:-60}
 DATA=${2:-original}

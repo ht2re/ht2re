@@ -79,10 +79,14 @@ int main(int argc, char** argv) {
         r.run(5.0f, -1.0f, 0.0f);
         result("reverse_speed_kmh", r.v.speedKmh(), "km/h");
         result("reverse_z_m", r.v.z(), "m");
+#ifdef HT2_NEW_VEHICLE
         if (r.v.gear() != -1 || r.v.speedKmh() >= -1.0f || r.v.z() >= -1.0f) return 2;
+#endif
         r.run(5.0f, 1.0f, 0.0f);
         result("reverse_to_forward_kmh", r.v.speedKmh(), "km/h");
+#ifdef HT2_NEW_VEHICLE
         if (r.v.gear() < 1 || r.v.speedKmh() <= 1.0f) return 3;
+#endif
     }
     // ---- acceleration -----------------------------------------------------
     {

@@ -148,15 +148,7 @@ int App::run(const Options& o) {
         refreshPlayerBody();
         initEconomy();
         applyEconomyActions();
-        // The original's left-hand road map: roads from every .way, the named
-        // facilities from the `map*` node convention, the town names and the
-        // petrol stations from the scripts (src/ui/Map.cpp).
-        map_.load(r_, opt_.dataDir, waySegs_, wayNodes_);
-        map_.addEconomy(economy_);
-        map_.addGameData(gameData_);
-        map_.setVisible(!opt_.noMap);
-        if (opt_.mapGiven) map_.setForced(true);
-        initSpeedLimits();
+        finishWorldDrivingInit();
         LOG("app: vehicle '%s' spawned at %.0f %.0f y=%.1f (submeshes %zu)",
             opt_.vehicle.c_str(), spawn_[0], spawn_[1], vehicle3d_.y(), trucks_.submeshes().size());
     }
@@ -1059,6 +1051,12 @@ void App::refreshPlayerBody() {
         modelBody(trucks_.submeshes(), len, rad, off);
         playerLength_ = len;
         playerRadius_ = rad;
+        float lo=1e30f,hi=-1e30f;
+        for (const auto& sm:trucks_.submeshes())
+            for (size_t i=2;i<sm.pos.size();i+=3) {
+                lo=std::min(lo,sm.pos[i]); hi=std::max(hi,sm.pos[i]);
+            }
+        if (hi>=lo) vehicle3d_.setCollisionHeight(hi-lo);
     }
     LOG("traffic: player body %.2f x %.2f m", (double)playerLength_,
         (double)(2.0f * playerRadius_));
@@ -1086,33 +1084,49 @@ void App::applyTrafficHits(float dt) {
     }
 }
 
+Mat4 App::trafficRoadPose(const Traffic::Car& c) const {
+    const auto b = traffic_.bodyOf(c.model);
+    const float halfTrack = std::max(0.6f, b.radius * 0.8f);
+    const float halfBase = std::max(0.6f, b.halfAxis() * 0.8f);
+    const float a = c.yaw * PI / 180.0f, fx = std::sin(a), fz = std::cos(a);
+    const float rx = fz, rz = -fx;
+    const float local[4][2] = {{0,halfBase},{0,-halfBase},{-halfTrack,0},{halfTrack,0}};
+    float h[4];
+    bool complete = true;
+    for (int i=0;i<4;++i) {
+        float distance; bool visible;
+        complete &= ground_.roadSurface().heightAt(c.x+rx*local[i][0]+fx*local[i][1],
+            c.z+rz*local[i][0]+fz*local[i][1], c.h, 12.0f, h[i], distance, visible);
+    }
+    if (!complete) {
+        float y = c.h;
+        if (y == 0 && !ground_.surfaceOnRoad(c.x,c.z,y) && !ground_.empty())
+            y = ground_.heightAt(c.x,c.z,0);
+        return Mat4::translation(c.x,y,c.z)*Mat4::rotY(c.yaw);
+    }
+    const float y = (h[0]+h[1]+h[2]+h[3])*.25f;
+    const float pitch = std::atan2(h[0]-h[1],2*halfBase);
+    const float roll = std::atan2(h[3]-h[2],2*halfTrack);
+    return Mat4::translation(c.x,y,c.z)*Mat4::rotY(c.yaw)*Mat4::rotX(-pitch)*Mat4::rotZ(roll);
+}
+
 void App::drawTraffic(float cx, float cy, float cz, float yaw, float pitch) {
     const std::vector<Traffic::Car>& cars = traffic_.cars();
     if (cars.empty()) return;
     r_.beginTraffic(cx, cy, cz, yaw, pitch);
     for (const auto& c : cars) {
-        // The graph gives the centre-line profile (`Car::h` is the `.way` road
-        // height, blended across junctions by Traffic).  It is the road surface,
-        // and it is what a car has to be drawn at: the GroundMap is a *terrain*
-        // field that runs several metres below the asphalt (docs/terrain_road.md
-        // measured 4.5..8.8 m over the whole network), so substituting it lifted
-        // or sank the cars.  Only when the graph has no height at all (a legacy
-        // zero) is the map asked for a surface, and then only its road profile.
-        float y = c.h;
-        if (c.h == 0.0f) {
-            float rh = 0.0f;
-            if (ground_.surfaceOnRoad(c.x, c.z, rh)) y = rh;
-            else if (!ground_.empty()) y = ground_.heightAt(c.x, c.z, 0.0f);
-        }
         int batch = -1;
         if (c.model >= 0 && c.model < (int)trafficYOff_.size()) {
             const size_t mi = (size_t)c.model;
-            y += trafficYOff_[mi];
             batch = (c.damage >= kDamageSkin && trafficDamaged_[mi] >= 0)
                         ? trafficDamaged_[mi] : trafficIntact_[mi];
         }
         if (batch < 0) continue;
-        Mat4 m = Mat4::translation(c.x, y, c.z) * Mat4::rotY(c.yaw);
+        // Ground-plane placement follows the actual asphalt under the four
+        // contact points; the graph remains the navigation/height reference.
+        Mat4 m = trafficRoadPose(c);
+        if (c.model >= 0 && c.model < (int)trafficYOff_.size())
+            m = m * Mat4::translation(0,trafficYOff_[(size_t)c.model],0);
         r_.drawTrafficInstance(batch, m);
     }
 }
@@ -1337,7 +1351,9 @@ bool App::switchPlayerVehicle(const std::string& model) {
     r_.setVehicleScene(&trucks_, &vehicleTex_);
     cockpit_.load(r_, opt_.dataDir, model);      // rebind the instruments (no-op if same brand)
     mirror_.load(r_, opt_.dataDir, &trucks_.anchorList, model);   // rebind the mirror mount
+    vehicle3d_.useVehicle(model);
     vehicle3d_.reset(vehicle3d_.x(), vehicle3d_.z(), vehicle3d_.yaw());
+    refreshPlayerBody();
     opt_.vehicle = model;
     LOG("economy: player vehicle is now '%s' (%zu submeshes)", model.c_str(),
         trucks_.submeshes().size());
@@ -1837,6 +1853,9 @@ bool App::loadData() {
     gameData_.load(opt_.dataDir);
     if (!opt_.vehicleGiven && !gameData_.playerVehicle.empty())
         opt_.vehicle = gameData_.playerVehicle;
+    vehicle3d_.useVehicle(opt_.vehicle);
+    LOG("vehicle: model '%s' tech '%s' mass %.0f hp %.0f", opt_.vehicle.c_str(),
+        vehicle3d_.spec().section.c_str(), vehicle3d_.spec().mass, vehicle3d_.spec().powerHp);
     // calibration is built into Terrain (see Terrain.h / NOTES.md)
     if (!terrain_.load(opt_.dataDir + "/MTR/terrain0.raw")) return false;
     // The original's weather presets and draw distance: WEATHER.INI next to the
@@ -2763,6 +2782,18 @@ void App::pumpLoading(Loading& lg, float dt) {
 // The tile textures (and the truck skins) are the expensive part and need a live
 // GL context, so this is where the original's loading screen is shown: each item
 // is reported through Loading::step() and presented with a real swap.
+void App::finishWorldDrivingInit() {
+    refreshPlayerBody();
+    map_.load(r_, opt_.dataDir, waySegs_, wayNodes_);
+    map_.addEconomy(economy_);
+    map_.addGameData(gameData_);
+    map_.setVisible(!opt_.noMap);
+    if (opt_.mapGiven) map_.setForced(true);
+    initSpeedLimits();
+    LOG("world-driving: map %s, limits ready, player body %.2f x %.2f",
+        map_.loaded() ? "ready" : "missing", playerLength_, playerRadius_*2);
+}
+
 void App::enterWorld() {
     stopMenuMusic();                 // the menu track does not follow into the world
     if (audio_.ready()) audio_.engineStart();
@@ -2835,9 +2866,12 @@ void App::enterWorld() {
     step("road network / minimap");
     prepareNodeEvents();
     if (opt_.traffic > 0 && traffic_.empty()) spawnTraffic();
+    if (opt_.startFuel >= 0.0f) vehicle3d_.setFuel(opt_.startFuel);
+    if (opt_.startDamage > 0.0f) vehicle3d_.addDamage(opt_.startDamage);
     initEconomy();
     applyEconomyActions();
     step("scripts");
+    finishWorldDrivingInit();
     if (showLoading) {
         lg.step(total, total, "готово");
         pumpLoading(lg, 1.0f / 60.0f);
@@ -3413,10 +3447,10 @@ int App::trafficReport() {
         const float dx = c.x - vehicle3d_.x(), dz = c.z - vehicle3d_.z();
         const float along = dx * pfx + dz * pfz;
         const float lat = dx * prx + dz * prz;
-        if (along < 0.0f || along > 30.0f || std::fabs(lat) > 4.0f) continue;
+        if (along > 0.0f || along < -30.0f || std::fabs(lat) > 4.0f) continue;
         if (c.speed < 1.0f) {
             ++queued;
-            nearestQueue = std::min(nearestQueue, along);
+            nearestQueue = std::min(nearestQueue, -along);
         }
     }
     const Traffic::Stats& s = traffic_.stats();
@@ -4073,13 +4107,16 @@ int App::trafficWheelProbe() {
                 float halfBase = std::max(0.6f, b.halfAxis() * 0.8f);
                 const float off[4][2] = {{0.0f, halfBase}, {0.0f, -halfBase},
                                          {-halfTrack, 0.0f}, {halfTrack, 0.0f}};
+                const Mat4 pose = trafficRoadPose(c);
                 bool junc = atJunction(c.x, c.z);
                 for (int w = 0; w < 4; ++w) {
-                    float wx = c.x + off[w][0], wz = c.z + off[w][1];
+                    float wx = pose.m[12] + pose.m[0]*off[w][0] + pose.m[8]*off[w][1];
+                    float wz = pose.m[14] + pose.m[2]*off[w][0] + pose.m[10]*off[w][1];
+                    float wheelY = pose.m[13] + pose.m[1]*off[w][0] + pose.m[9]*off[w][1];
                     bool isRoad = false;
                     float sy = 0;
                     if (!grid.nearest(wx, wz, c.h, 40.0f, true, sy, isRoad)) { ++noAsphalt; ++hNo; continue; }
-                    float e = c.h - sy;
+                    float e = wheelY - sy;
                     {
                         int src = 0;
                         ground_.drivableY(wx, wz, c.h, &src, nullptr);

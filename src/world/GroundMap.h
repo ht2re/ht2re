@@ -1,6 +1,7 @@
 #pragma once
 #include <map>
 #include <vector>
+#include <limits>
 #include "B3D.h"
 #include "RoadSurface.h"
 
@@ -36,17 +37,12 @@ public:
     // the drivable profile answered by surfaceAt()/surfaceOnRoad() is the exact
     // nearest point of this polyline set, so it has no 12-unit quantisation.
     void setRoadSegments(const std::vector<float>& xyz1);
-    // The tiles' own road surfaces (src/world/RoadSurface.{h,cpp}), built from
-    // the world meshes.  It is the surface between the `.way` profile and the
-    // terrain: on the network the exact polyline wins (it is the authored
-    // centreline), just off it the tile asphalt answers, and only beyond that
-    // does the terrain field take over.
+    // Authored asphalt triangles take precedence wherever they cover a point;
+    // the graph profile is the fallback when no actual road surface is found.
     void buildRoadSurface(const std::vector<B3D::SubMesh>& meshes);
     const RoadSurface& roadSurface() const { return roadField_; }
-    // One entry point for "what is the drivable surface here": the `.way`
-    // profile within 32 m of the network (blended into the terrain over
-    // 32..80 m), else the tile asphalt within 12 m (blended over 4..12 m), else
-    // the terrain field.  `outSource` is 0 = terrain, 1 = `.way`, 2 = tile road.
+    // One entry point: containing asphalt, else graph profile/ramp, else terrain.
+    // `outSource` is 0 = terrain, 1 = `.way`, 2 = tile road.
     float drivableY(float x, float z, float fallback, int* outSource = nullptr,
                     float* outDist = nullptr) const;
     bool empty() const { return w_ <= 0 || h_ <= 0 || data_.empty(); }
@@ -100,7 +96,7 @@ public:
     static constexpr float CEILING_FADE = 450.0f;  // world units to reach the raw heightmap
     // Sea / lake planes are not drivable: the tiles carry big water quads whose
     // height is the sea level, which would otherwise become ground.
-    bool waterAt(float x, float z) const;
+    bool waterAt(float x, float z, float roadHeight = std::numeric_limits<float>::quiet_NaN()) const;
     // Is the point inside the mapped world at all?  Outside it there is no
     // ground data, so the vehicle must be stopped at the edge.
     bool inside(float x, float z) const;

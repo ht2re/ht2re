@@ -90,6 +90,7 @@ public:
     void setHeightRef(float y) { heightRef = y; }
     // Drivable height at (x, z): the road surface when the point is on a road.
     float surfaceY(float x, float z, float fallback) const;
+    void setCollisionHeight(float h) { collisionHeight_ = std::max(0.5f,h); }
     // Solid world geometry (src/game/Collision.cpp); when set, the body slides
     // along walls instead of passing through them.
     void setCollision(const Collision* c) { collision = c; }
@@ -112,6 +113,7 @@ public:
     float speedKmh() const { return speed_ * 3.6f; }
     float pitch() const { return pitch_; }
     float roll() const { return roll_; }
+    float steering() const { return steer_; } // smoothed steering, -1..1
     // distance travelled since reset (for the drive test)
     float odometer() const { return odo_; }
     // Instrument cluster values: fuel 0..1 of the vehicle's own tank, the gear
@@ -197,7 +199,8 @@ private:
 
     const GroundMap* ground = nullptr;
     const GroundMap* roads = nullptr;    // road profile of the same map (setRoads)
-    mutable float heightRef = -1e30f;    // last drivable height (clamped fallback)
+    float heightRef = -1e30f;    // committed centre contact height, never query-mutated
+    float collisionHeight_ = 4.0f; // model bbox height; fallback without a loaded mesh
     const Collision* collision = nullptr;
     float x_ = 0, y_ = 0, z_ = 0, yaw_ = 0;
     float speed_ = 0, steer_ = 0;

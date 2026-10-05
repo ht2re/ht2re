@@ -1,5 +1,20 @@
 # The road breaking apart on bends ("дорога разваливается на поворотах")
 
+Update 2026-10-05 (repeat report): physics now prefers the containing authored
+asphalt triangle over the graph height. `RoadSurface::heightAt` reports zero
+horizontal distance for a contained point, rather than distance to a triangle
+edge: wide road polygons previously blended with terrain or disappeared from
+the contact layer at their centre. Height queries no longer mutate the vehicle
+reference while sampling motion/individual wheels. The 32m graph profile/ramp
+remains a fallback where no authored road triangle answers. The historical
+layer-precedence descriptions below are superseded by this paragraph.
+
+`road-probe` on the same 170190 tile points: single-surface p95 error reduced
+from 0.250m to 0.000m; on-network p95 from 0.450m to 0.000m; off-network missing
+layer answers 8 → 0. Residual max 12m at tier/overlap ambiguities is still open.
+Physics/camera pose fixes do not prove that all temporal texture aliasing or
+depth fighting reported in the user's exact location is gone.
+
 Root cause, fix and the measurements behind it.  Everything below is
 reproducible from the commands in §6; the frames are
 `shots/road_break_before.png` / `shots/road_break_after.png`.

@@ -4,6 +4,9 @@
 #include <vector>
 #include <cstddef>
 #include <cstdint>
+#include <array>
+#include <limits>
+#include <unordered_map>
 #include "../world/B3D.h"
 
 namespace ht2 {
@@ -17,9 +20,9 @@ namespace ht2 {
 // O(1) in the world size: a lookup of the cells the circle overlaps.
 //
 // Coordinates are the B3D ones used by B3D::SubMesh: pos = (x, z, height).
-// The simulated world is two-dimensional (x, z) -- there is no height in the
-// query, so an overpass deck does not block the road below it and only the
-// wall-like geometry around a driveway blocks it.
+// Legacy queries use the 2D occupancy grid. Height-aware circle/sweep queries
+// clip original triangles to the body's vertical slab, using 32m spatial bins.
+// Player driving supplies the road height and loaded model's bbox height.
 //
 // A body is a **capsule**: a segment of `length - 2 * radius` along the vehicle
 // heading with radius `radius` (i.e. the rectangle of the car plus its corner
@@ -49,13 +52,17 @@ public:
     int height() const { return nz_; }
 
     // Is the circle (x, z, r) overlapping solid geometry?
-    bool blocked(float x, float z, float r) const;
+    bool blocked(float x, float z, float r,
+                 float bottom = -std::numeric_limits<float>::infinity(),
+                 float top = std::numeric_limits<float>::infinity()) const;
 
     // Try to move from (fromX,fromZ) to (toX,toZ) for a body of radius `r`.
     // Returns true when the destination is free; otherwise `outX/outZ` hold the
     // furthest free point along the segment (slide, no penetration).
     bool resolveMove(float fromX, float fromZ, float toX, float toZ, float r,
-                     float& outX, float& outZ) const;
+                     float& outX, float& outZ,
+                     float bottom = -std::numeric_limits<float>::infinity(),
+                     float top = std::numeric_limits<float>::infinity()) const;
 
     // --- capsules (vehicles) -----------------------------------------------
     // The two ends of a body's axis, `yaw` in degrees with forward = (sin, cos)
@@ -100,8 +107,18 @@ private:
                bit((size_t)ix * (size_t)nz_ + (size_t)iz);
     }
     // furthest free t in [0,1] along from->to (0 when `from` is blocked)
-    float sweep(float fromX, float fromZ, float toX, float toZ, float r) const;
-    bool contactNormal(float x, float z, float r, float& outNx, float& outNz) const;
+    float sweep(float fromX, float fromZ, float toX, float toZ, float r,
+                float bottom, float top) const;
+    bool contactNormal(float x, float z, float r, float& outNx, float& outNz,
+                       float bottom = -std::numeric_limits<float>::infinity(),
+                       float top = std::numeric_limits<float>::infinity()) const;
+    bool blockedHeight(float x, float z, float r, float bottom, float top) const;
+    static uint64_t wallKey(int x, int z) {
+        return (uint64_t(uint32_t(x)) << 32) | uint32_t(z);
+    }
+    std::vector<std::array<float,9>> walls_; // B3D x,z,height triangles
+    std::unordered_map<uint64_t,std::vector<size_t>> wallBuckets_; // 32m bins
+    std::vector<size_t> wideWalls_; // pathological large footprints, no huge bin allocation
 
     std::vector<uint64_t> bits_;    // 1 = solid cell, ix * nz_ + iz
     float cell_ = 1.0f, x0_ = 0.0f, z0_ = 0.0f;

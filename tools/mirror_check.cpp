@@ -88,17 +88,18 @@ void drawCockpitFrame(Renderer& r, Mirror* mirror, Cockpit& ck, const Vehicle& v
     float cx, cy, cz, camYaw, camPitch;
     cockpitEye(ck, v, cx, cy, cz, camYaw, camPitch);
     r.clear();
-    r.setNearPlane(0.4f);
+    r.setNearPlane(ck.loaded() ? 2.0f : 0.4f);
     const bool instruments = ck.loaded();
     r.setVehicleTwoSided(!instruments);
     r.draw(cx, cy, cz, camYaw, camPitch);
     if (haveScene) r.drawScene(cx, cy, cz, camYaw, camPitch);
-    if (haveTrucks) {
+    if (haveTrucks && !instruments) {
         r.setModel(v.modelMatrix());
         r.drawVehicleScene(cx, cy, cz, camYaw, camPitch);
         r.clearModel();
     }
     ck.setVisible(true);
+    if (instruments) { r.clearDepth(); r.setNearPlane(0.4f); }
     ck.draw(r, v.modelMatrix(), v, cx, cy, cz, camYaw, camPitch);
     if (mirror) mirror->draw(r, v.modelMatrix());
     r.setNearPlane(2.0f);

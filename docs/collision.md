@@ -1,5 +1,15 @@
 # World collision — what the truck can drive through
 
+Update 2026-10-05: player driving passes its vertical body interval to
+`resolveMove`. Wall triangles are kept in 32m spatial bins, clipped to that
+interval and only then projected onto the ground plane. Geometry above a
+truck or below its road no longer forms an infinite-height wall. Real walls
+still stop sweeps. The interval height comes from the loaded truck mesh bbox
+(4m fallback without a mesh). Existing heightless queries/capsule AI queries
+retain the historical 2D grid; the description below refers to that path.
+`tools/road_safety_test.cpp` covers overhead/underground walls, sloped clipping
+and retention of real blocking geometry.
+
 `src/game/Collision.{h,cpp}` answers one question against the *drawn* world geometry:
 
 > can a body of radius `r`, centred at `(x, z)`, be here — and if not, where does it stop
@@ -210,10 +220,10 @@ SubMeshes on link-heavy tiles (aa, ad, aj, al, am).
 
 ## 6. Known limits
 
-* **2D only.**  A vertical face whose (x, z) projection crosses a drivable area blocks it
-  even if it is physically above or beside the road.  Horizontal geometry is filtered out,
-  but e.g. the cliff face where an `RSEG` polyline runs into the mountain at (2050, −3750)
-  does block.  Adding height would need an API change (a `y` argument on the queries).
+* **Legacy capsule queries are 2D.** A vertical face projected onto an AI route
+  may still block another level. Player circle/sweep queries now accept
+  `bottom, top` after the existing arguments and clip the actual wall triangles;
+  callers omitting these parameters retain the old occupancy-grid behavior.
 * **Steep terrain blocks.**  `mat_mount*`, `mat_slope*`, forest and swamp billboards with
   `|n_h| ≤ 0.8` are solid, so hillsides and dense forest are natural barriers.  This follows
   the brief's "block the rest"; adding `mount|slope` to `GROUND_MAT` would open them up.

@@ -212,7 +212,15 @@ could place a car at a completely different height: the blend makes the profile
 continuous by construction, and a relocated car resets its own height reference.
 Measured: 0 steps > 0.5 m, max 0.05 m per frame at every density.
 
-`c.h` is also the height the car is **drawn** at.  `App::drawTraffic` used to
+Current update (2026-10-05): `c.h` is the navigation/reference height, not a
+flat render pose. `App::trafficRoadPose()` queries asphalt at four yaw-rotated
+contact points and derives height/pitch/roll; `drawTraffic` and the wheel probe
+share that transform. Missing surfaces keep the graph fallback. On the 8-second
+probe: 76,251 samples, mean +0.002 m, median/p95 0.000 m, max 1.560 m, none over
+5 m. Points at some nonplanar seams remain imperfect; this is a port fit to the
+rendered geometry, not a recovered original suspension algorithm.
+
+Historical measurements before that update: `App::drawTraffic` used to
 replace it with `GroundMap::heightAt()` whenever the two were within 4 m; that
 map is a *terrain* field which, under a carriageway, sits several metres below the
 asphalt (docs/terrain_road.md §8), so the substitution was the "cars fly / sink"

@@ -68,9 +68,12 @@ DUMMY_AUDIO = {"SDL_AUDIODRIVER": "dummy"}
 
 
 failures = []
+checks = 0
 
 
 def check(name, cond, detail=""):
+    global checks
+    checks += 1
     print(("  ok   " if cond else "  FAIL ") + name + ((" -- " + detail) if detail else ""))
     if not cond:
         failures.append(name)
@@ -443,9 +446,9 @@ check("the sea is not drivable", bool(m3) and float(m3.group(1)) < 20.0,
 print("menu -> world transition")
 run("--scene", "menu", "--size", "1280x720", "--time", "0", "--screenshot",
     "--out", os.path.join(OUT, "menu_state.bmp"))
-run("--autostart", "--no-map", "--size", "1280x720", "--screenshot", "--out",
+autostart_out = run("--autostart", "--no-map", "--size", "1280x720", "--screenshot", "--out",
     os.path.join(OUT, "autostart.bmp"), "--spawn", "4700,-5700,180", "--warmup", "6")
-run("--scene", "world", "--no-map", "--size", "1280x720", "--screenshot", "--out",
+direct_out = run("--scene", "world", "--no-map", "--size", "1280x720", "--screenshot", "--out",
     os.path.join(OUT, "direct.bmp"), "--spawn", "4700,-5700,180", "--warmup", "6")
 _, _, t = read_bmp(os.path.join(OUT, "autostart.bmp"))
 _, _, px = read_bmp(os.path.join(OUT, "direct.bmp"))
@@ -457,6 +460,11 @@ for y in range(0, 720, 4):
 tot = (720 // 4) * (1280 // 4)
 # the HUD carries live readouts (the clock advances during the transition)
 check("autostart reaches the same world", same > tot * 0.70, f"{100.0 * same / tot:.1f}% identical")
+pattern = r"world-driving: map ready, limits ready, player body ([\d.]+ x [\d.]+)"
+am, dm = re.search(pattern,autostart_out), re.search(pattern,direct_out)
+check("menu and direct world initialize map, limits and the same player body",
+      bool(am and dm) and am.group(1)==dm.group(1),
+      f"menu {am.group(1) if am else 'missing'}, direct {dm.group(1) if dm else 'missing'}")
 
 # ------------------------------------------------------------------ cockpit UI
 # Matching the original: the driving HUD is ONE 1600x50 chrome/LED strip
@@ -1413,9 +1421,9 @@ if m:
           abs(float(m.group(5))) < 0.05 and float(m.group(6)) <= 0.5,
           f"median {m.group(5)} m, p95 {m.group(6)} m, max {m.group(7)} m")
 
-# The layer breakdown of the running simulation: the AI cars must stay on the
-# authored `.way` profile (the layer that agrees with the graph they are drawn at)
-# and must never be answered by the terrain field, which is the cut below the road.
+# The graph navigates the cars; their rendered pose follows authored asphalt.
+# Both .way and tile asphalt are valid. Check geometric accuracy, not an arbitrary
+# ratio between the two layers; terrain must not support road traffic.
 rep2 = run("--scene", "world", "--traffic-wheel-probe", "8")
 m = re.search(r"traffic-wheel-probe: player route \(2 starts\): \d+ frames, layers terrain "
               r"\d+, \.way \d+, tile asphalt \d+, (\d+) m driven", rep2)
@@ -1425,10 +1433,18 @@ check("the truck drives off the road network without being blocked (the apron ha
       f"the climb check refuses")
 m2 = re.search(r"traffic-wheel-probe: surface layers under the wheels: terrain (\d+), "
                r".way (\d+), tile asphalt (\d+)", rep2)
-check("the AI cars ride the .way profile, not the tile/terrain layers",
-      bool(m2) and int(m2.group(1)) == 0 and int(m2.group(2)) > int(m2.group(3)) * 10,
-      f"terrain {m2.group(1)}, .way {m2.group(2)}, tile {m2.group(3)}" if m2
-      else "no layer line")
+geometry = re.search(r"traffic-wheel-probe: RESULT samples=(\d+) noasphalt=(\d+) "
+                     r"mean=(-?[\d.]+) median=(-?[\d.]+) p95=([\d.]+) max=([\d.]+) "
+                     r"over5=(\d+) over20=(\d+)", rep2)
+check("AI road layers keep rendered wheels on the authored asphalt",
+      bool(m2 and geometry) and int(m2.group(1)) == 0
+      and int(m2.group(2)) + int(m2.group(3)) > 20000
+      and int(geometry.group(1)) > 20000 and float(geometry.group(5)) <= 0.25
+      and float(geometry.group(6)) < 2 and int(geometry.group(7)) == 0
+      and int(geometry.group(8)) == 0,
+      f"terrain {m2.group(1)}, .way {m2.group(2)}, tile {m2.group(3)}; "
+      f"p95 {geometry.group(5)} m, max {geometry.group(6)} m" if m2 and geometry
+      else "no layer/geometric result line")
 
 # --------------------------------------------------------------- draw distance
 print("draw distance (--view-distance)")
@@ -1504,6 +1520,8 @@ check("--weather-cycle drives the state (phase 0.5 = rain)", bool(m) and m.group
 
 
 print()
+check("regression check count does not shrink", checks >= 173, f"{checks} checks (minimum 173)")
+print(f"{checks} checks, {len(failures)} failures")
 if failures:
     print(f"FAILED: {len(failures)} check(s): {', '.join(failures)}")
     sys.exit(1)

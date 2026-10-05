@@ -140,10 +140,21 @@ const Vehicle::TechSpec* Vehicle::findTech(const std::string& want) {
         for (char c : s.display) d.push_back((char)::toupper((unsigned char)c));
         if (d == up) return &s;
     }
-    return nullptr;
+    const TechSpec* variant = nullptr;
+    size_t longest = 0;
+    for (const TechSpec& s : t) {
+        std::string d;
+        for (char c : s.display) d.push_back((char)::toupper((unsigned char)c));
+        if (!d.empty() && d.size() > longest && up.compare(0, d.size(), d) == 0) {
+            variant = &s;
+            longest = d.size();
+        }
+    }
+    return variant; // B3D variants, e.g. ZilR, append a suffix to the display name
 }
 
 void Vehicle::useVehicle(const std::string& sectionOrDisplay) {
+    if (sectionOrDisplay.empty()) return;
     if (const TechSpec* s = findTech(sectionOrDisplay)) { applySpec(*s); return; }
     if (!techTable().empty()) {
         // Default to the lorry the shipped GAME.CNF starts the player in.
@@ -181,17 +192,14 @@ float Vehicle::surfaceY(float x, float z, float fallback) const {
     // what it did before the road profile was wired in (docs/terrain_road.md §8).
     static const bool noProfile = getenv("HT2_NO_ROAD_PROFILE") != nullptr;
     if (roads && !noProfile) {
-        // GroundMap::drivableY() owns the layering: the `.way` profile within
-        // 32 m of the network (blended into the terrain over 32..80 m), else the
-        // tiles' own asphalt within 12 m (blended over 4..12 m), else the terrain
-        // field.  `heightRef` (the height the truck is riding at) is the
-        // reference that lets a viaduct and the carriageway under it be told
-        // apart, and it is the base of the off-road fallback below.
+        // Query actual asphalt first, then graph/terrain fallback. The explicit
+        // reference distinguishes a deck from the carriageway underneath it.
+        // Sampling wheels must not change the reference for other samples.
         float base = ground ? ground->heightAt(x, z, fallback) : fallback;
         if (!ground) return fallback;
         int src = 0;
         float dist = 0.0f;
-        const float refIn = heightRef > -1e29f ? heightRef : base;
+        const float refIn = fallback > -1e29f ? fallback : base;
         float h = ground->drivableY(x, z, refIn, &src, &dist);
         if (getenv("HT2_RIDE_DEBUG") && std::fabs(h) < 1.0f && std::fabs(z + 4575.0f) < 5.0f)
             LOG("surfaceY-debug: (%.1f, %.1f) refIn %.2f base %.2f h %.3f src %d heightRef %.2f",
@@ -201,12 +209,11 @@ float Vehicle::surfaceY(float x, float z, float fallback) const {
         // unmapped asphalt, so one query is not allowed to drop the truck into
         // it.  A 3 m correction is already 10x any road grade, and the ride
         // smooths it over the following frames.
-        if (heightRef > -1e29f) {
-            float d = base - heightRef;
+        if (fallback > -1e29f) {
+            float d = base - fallback;
             if (d > 3.0f) d = 3.0f;
             if (d < -3.0f) d = -3.0f;
-            heightRef += d;            // remember the corrected value: the next
-            return heightRef;          // frame continues from here, not from base
+            return fallback + d;      // query only: never mutate the ride state
         }
         return base;
     }
@@ -465,7 +472,7 @@ void Vehicle::update(const Input& in, float dt) {
             blocked_ = true;                      // the edge of the mapped world
             dx = dz = 0;
             speed_ *= 0.1f;
-        } else if (ground->waterAt(x_ + dx, z_ + dz)) {
+        } else if (ground->waterAt(x_ + dx, z_ + dz, nxt)) {
             blocked_ = true;                      // the sea is not a road
             dx = dz = 0;
             speed_ *= 0.1f;
@@ -487,7 +494,9 @@ void Vehicle::update(const Input& in, float dt) {
         for (int end = -1; end <= 1 && ok; end += 2) {
             float sx = x_ + fx * off * (float)end, sz = z_ + fz * off * (float)end;
             float tx = sx + dx, tz = sz + dz;
-            if (!collision->resolveMove(sx, sz, tx, tz, rad, ox, oz)) {
+            const float bottom = y_ - RIDE_HEIGHT + 0.05f;
+            if (!collision->resolveMove(sx, sz, tx, tz, rad, ox, oz,
+                                        bottom, bottom + collisionHeight_)) {
                 ok = false;
                 dx = ox - sx;
                 dz = oz - sz;
@@ -538,7 +547,7 @@ Mat4 Vehicle::modelMatrix() const {
     // translate so the wheel contact plane sits on the ground.
     Mat4 m = Mat4::translation(x_, y_, z_);
     m = m * Mat4::rotY(yaw_);
-    m = m * Mat4::rotX(pitch_ * PI / 180.0f);
+    m = m * Mat4::rotX(-pitch_ * PI / 180.0f);
     m = m * Mat4::rotZ(roll_ * PI / 180.0f);
     return m;
 }

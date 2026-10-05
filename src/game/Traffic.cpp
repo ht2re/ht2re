@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <queue>
 #include <utility>
@@ -629,7 +630,10 @@ bool Traffic::entryBlocked(int edge, int dir, float s, const Car* self) const {
         if (&o == self || o.edge != edge) continue;
         const float os = (o.dir == dir) ? o.s : (len - o.s);
         const float d = os - s;
-        if (d > -kCarLength && d < kCarLength + kStandGap) return true;
+        const float clearance = self
+            ? 0.5f * (bodyOf(self->model).length + bodyOf(o.model).length)
+            : bodyOf(o.model).length;
+        if (d > -clearance && d < clearance + kStandGap) return true;
     }
     return false;
 }
@@ -1216,6 +1220,8 @@ void Traffic::separateSameLane() {
         const float lead = 0.5f * (bodyOf(back.model).length + bodyOf(front.model).length);
         const float limit = front.s - lead - kStandGap;
         if (back.s > limit) {
+            if (std::getenv("HT2_TRAFFIC_JUMPS") && back.s - limit > 0.5f)
+                LOG("traffic-clamp: edge %d dir %d back %.2f -> %.2f front %.2f", back.edge, back.dir, back.s, std::max(0.0f, limit), front.s);
             back.s = std::max(0.0f, limit);
             if (back.speed > front.speed) back.speed = front.speed;
         }
@@ -1297,8 +1303,8 @@ void Traffic::update(float dt, float px, float pz, float radius) {
             }
         }
         if (holdJunction)
-            target = std::min(target, std::min(std::max(0.0f, (c.s - hold) * 1.2f),
-                                               stopCap(c.s - hold)));
+            target = std::min(target, std::min(std::max(0.0f, (hold - c.s) * 1.2f),
+                                               stopCap(hold - c.s)));
         const float dv = target - c.speed;
         const float lim = (dv > 0.0f ? kAccel : kBrake) * dt;
         c.speed += std::max(-lim, std::min(lim, dv));
@@ -1312,7 +1318,9 @@ void Traffic::update(float dt, float px, float pz, float radius) {
             c.speed = 0.0f;
             c.yielding = true;                              // queueing != being stuck
         }
-        holdS_[i] = holdJunction ? hold : -1.0f;
+        // Only protect an actual stop-line hold. A car already INSIDE the
+        // junction must not be pulled backwards to a newly busy stop line.
+        holdS_[i] = holdJunction && c.s <= hold + 1e-3f ? hold : -1.0f;
         int guard = 0;
         while (c.s > edges_[c.edge].len && guard++ < kMaxTransitions) {
             if (!advanceJunction(c, px, pz, radius)) break;
@@ -1386,6 +1394,8 @@ void Traffic::update(float dt, float px, float pz, float radius) {
             const float moved = std::sqrt(dist2(c.x, c.z, prevX_[i], prevZ_[i]));
             const float slack = c.speed * dt + 0.5f;
             if (moved > slack) {
+                if (std::getenv("HT2_TRAFFIC_JUMPS"))
+                    LOG("traffic-jump: car %zu edge %d dir %d s %.2f prev %d next %d shift %.2f from %.2f %.2f to %.2f %.2f moved %.2f", i, c.edge, c.dir, c.s, c.prevEdge, c.nextEdge, c.shift, prevX_[i], prevZ_[i], c.x, c.z, moved);
                 ++stats_.jumps;
                 if (moved > stats_.maxJump) stats_.maxJump = moved;
             }

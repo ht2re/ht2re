@@ -404,11 +404,17 @@ bool GroundMap::inside(float x, float z) const {
            x < minX_ + w_ * cell_ && z < minZ_ + h_ * cell_;
 }
 
-bool GroundMap::waterAt(float x, float z) const {
+bool GroundMap::waterAt(float x, float z, float roadHeight) const {
     if (water_.empty()) return false;
     int gx = (int)((x - minX_) / cell_), gz = (int)((z - minZ_) / cell_);
     if (gx < 0 || gz < 0 || gx >= w_ || gz >= h_) return false;
-    return water_[(size_t)gz * w_ + gx] != 0;
+    if (!water_[(size_t)gz * w_ + gx]) return false;
+    if (std::isfinite(roadHeight)) {
+        float h,d; bool visible;
+        if (roadField_.heightAt(x,z,roadHeight,0,h,d,visible) &&
+            std::fabs(h-roadHeight)<0.1f) return false;
+    }
+    return true;
 }
 
 float GroundMap::heightAt(float x, float z, float fallback) const {
@@ -474,6 +480,13 @@ float GroundMap::drivableY(float x, float z, float fallback, int* outSource,
         // sits 12 m up on the terrain and has to reach the asphalt).
         if (tileHit && (tileD > 12.0f || !(std::fabs(tileY - ref) <= 20.0f)))
             tileHit = false;
+    }
+    // A containing authored asphalt triangle is the actual contact surface.
+    // The graph is navigation, not a substitute for the deck's crossfall.
+    if (tileHit && tileD < 0.01f) {
+        if (outSource) *outSource = 2;
+        if (outDist) *outDist = 0;
+        return tileY;
     }
     float wayY = 0.0f, wayD = 0.0f;
     bool wayHit = false;

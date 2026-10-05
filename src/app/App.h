@@ -339,12 +339,14 @@ private:
     Traffic traffic_;
     Collision collision_;
     void drawTraffic(float cx, float cy, float cz, float yaw, float pitch);
+    Mat4 trafficRoadPose(const Traffic::Car& car) const;
     void spawnTraffic();
     // The player's body for the car contacts (from the model bbox).
     float playerRadius_ = 1.45f, playerLength_ = 9.5f;
     float crashCooldown_ = 0.0f;  // s, throttle for repeated car-impact crash sounds
     size_t carCrashes_ = 0;       // AI-car impacts that played the crash one-shot
     void refreshPlayerBody();
+    void finishWorldDrivingInit();
     // Push / damage / crash sound from the contacts Traffic resolved this frame.
     void applyTrafficHits(float dt);
     // --traffic-report SECONDS: run the AI headlessly and print the statistics.

@@ -331,6 +331,7 @@ bool Cockpit::load(Renderer& r, const std::string& dataDir, const std::string& v
     // (Zil) and the equivalent panels of the other cabs, and skips the rest of
     // the interior shell, which would otherwise surround the camera.
     std::vector<B3D::SubMesh> panels;
+    std::vector<B3D::SubMesh> wheelParts;
     std::vector<bool> panelUsed(cab_.submeshes().size(), false);
     for (const Needle& n : needles_) {
         const float px = n.pose.t[0], pz = n.pose.t[1], ph = n.pose.t[2];
@@ -371,22 +372,9 @@ bool Cockpit::load(Renderer& r, const std::string& dataDir, const std::string& v
         if (startsWith(lower(sm.name), "rule")) {
             B3D::Anchor wheel;
             if (cab_.anchorOf(brand_ + "RuleSpace", wheel)) {
-                // Subtag-4 self anchors are deliberately ignored by the scene
-                // walker for animated parts. Mount the wheel at its authored pivot.
-                for (size_t v = 0; v + 2 < part.pos.size(); v += 3) {
-                    const float p[3] = {part.pos[v], part.pos[v + 1], part.pos[v + 2]};
-                    for (int axis = 0; axis < 3; ++axis)
-                        part.pos[v + axis] = wheel.t[axis] + wheel.m[axis * 3] * p[0]
-                                          + wheel.m[axis * 3 + 1] * p[1]
-                                          + wheel.m[axis * 3 + 2] * p[2];
-                }
-                for (size_t v = 0; v + 2 < part.nrm.size(); v += 3) {
-                    const float p[3] = {part.nrm[v], part.nrm[v + 1], part.nrm[v + 2]};
-                    for (int axis = 0; axis < 3; ++axis)
-                        part.nrm[v + axis] = wheel.m[axis * 3] * p[0]
-                                          + wheel.m[axis * 3 + 1] * p[1]
-                                          + wheel.m[axis * 3 + 2] * p[2];
-                }
+                wheelPose_ = glFromAnchor(wheel);
+                wheelParts.push_back(twoSided(part));
+                continue; // mesh-local animated wheel, no static duplicate
             }
         }
         panels.push_back(twoSided(part));
@@ -396,6 +384,11 @@ bool Cockpit::load(Renderer& r, const std::string& dataDir, const std::string& v
         for (const auto& p : panels) panelTris_ += p.idx.size() / 3;
     }
 
+    if (!wheelParts.empty()) {
+        wheelBatch_ = r.addTrafficModel(wheelParts, &tex_);
+        for (const auto& part : wheelParts) wheelTris_ += part.idx.size() / 3;
+        LOG("cockpit: %sRuleSpace steering wheel ready (%zu triangles)", brand_.c_str(), wheelTris_);
+    }
     place_ = Mat4::translation(0.0f, kPlaceH, kPlaceZ);
     eye_[0] = kEyeCabX;
     eye_[1] = kEyeCabH + kPlaceH;
@@ -414,6 +407,9 @@ void Cockpit::unload(Renderer& r) {
     (void)r;                 // the Renderer owns the batches and frees them at shutdown
     needles_.clear();
     panelBatch_ = -1;
+    wheelBatch_ = -1;
+    wheelTris_ = 0;
+    wheelAngle_ = 0;
     panelTris_ = needleTris_ = 0;
     loaded_ = false;
     visible_ = false;
@@ -442,12 +438,23 @@ bool Cockpit::eyePose(float& x, float& y, float& z, float& pitchDeg) const {
     return true;
 }
 
+Mat4 Cockpit::wheelTransform(float steering) const {
+    // Rule_0 is authored in raw B3D XY, hence GL XZ. Its spin normal is local
+    // GL +Y; the RuleSpace mount then supplies the steering-column tilt.
+    return wheelPose_ * Mat4::rotY(steering * 450.0f);
+}
+
 void Cockpit::draw(Renderer& r, const Mat4& vehicleModel, const Vehicle& v,
                    float camX, float camY, float camZ, float camYawDeg, float camPitchDeg) {
     if (!loaded_ || !visible_) return;
     r.beginTraffic(camX, camY, camZ, camYawDeg, camPitchDeg);
     const Mat4 base = vehicleModel * place_;
     if (panelBatch_ >= 0) r.drawTrafficInstance(panelBatch_, base);
+    if (wheelBatch_ >= 0) {
+        // Presentation range chosen for the port, not an original steering ratio.
+        wheelAngle_ = v.steering() * 450.0f;
+        r.drawTrafficInstance(wheelBatch_, base * wheelTransform(v.steering()));
+    }
     for (Needle& n : needles_) {
         float val = gaugeValue(n, v) / n.maxValue;
         val = std::min(1.0f, std::max(0.0f, val));

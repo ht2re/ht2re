@@ -3,7 +3,12 @@
 Update 2026-10-05: cockpit is now the default world view. The renderer retains
 the full available cabin geometry, excluding the separate glass overlay, and
 mounts `Rule_0` using the authored `<Brand>RuleSpace` transform. Earlier sections
-describing the cluster-only renderer are historical. The common eye/placement
+describe the recovery history. The wheel is now a separate animated batch:
+its mesh remains local to `RuleSpace`, and the smoothed `Vehicle::steering()`
+rotates it about its local axis. The presentation range is ±450 degrees
+(chosen for the port, not recovered from king.exe). It returns to centre when
+steering is released; hidden cockpit views do not draw or update the wheel.
+The sections describing the cluster-only renderer are historical. The common eye/placement
 constants are still an approximation; the exact `_Viewer` camera composition
 and the seven subtag-4 cabins remain open (see `engine_discrepancies.md`).
 

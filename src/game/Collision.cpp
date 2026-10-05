@@ -178,6 +178,7 @@ float Collision::defaultCellSize() { return 1.0f; }
 
 void Collision::clear() {
     bits_.clear();
+    walls_.clear(); wallBuckets_.clear(); wideWalls_.clear();
     nx_ = nz_ = 0;
     x0_ = z0_ = 0.0f;
     solidCells_ = 0;
@@ -249,11 +250,21 @@ void Collision::build(const std::vector<B3D::SubMesh>& meshes, float cellSize) {
             if (absurd(a) || absurd(b) || absurd(c)) continue;
             if (triUpComponent(a, b, c) > kHorizontalUp) continue;   // surface
             ++stats_.triangles;
+            const size_t wall = walls_.size();
+            walls_.push_back({a[0],a[1],a[2],b[0],b[1],b[2],c[0],c[1],c[2]});
 
             const float tx0 = std::min(a[0], std::min(b[0], c[0]));
             const float tx1 = std::max(a[0], std::max(b[0], c[0]));
             const float tz0 = std::min(a[1], std::min(b[1], c[1]));
             const float tz1 = std::max(a[1], std::max(b[1], c[1]));
+            const int bx0 = (int)std::floor(tx0/32), bx1 = (int)std::floor(tx1/32);
+            const int bz0 = (int)std::floor(tz0/32), bz1 = (int)std::floor(tz1/32);
+            if ((int64_t)(bx1-bx0+1)*(bz1-bz0+1) > 65536)
+                wideWalls_.push_back(wall);
+            else
+                for (int bx=bx0;bx<=bx1;++bx)
+                    for (int bz=bz0;bz<=bz1;++bz)
+                        wallBuckets_[wallKey(bx,bz)].push_back(wall);
             int i0 = std::max(0, (int)std::floor((tx0 - x0_) / cell_));
             int i1 = std::min(nx_ - 1, (int)std::floor((tx1 - x0_) / cell_));
             int j0 = std::max(0, (int)std::floor((tz0 - z0_) / cell_));
@@ -296,9 +307,61 @@ void Collision::build(const std::vector<B3D::SubMesh>& meshes, float cellSize) {
         stats_.ground, stats_.flat, stats_.submeshes);
 }
 
-bool Collision::blocked(float x, float z, float r) const {
+bool Collision::blockedHeight(float x, float z, float r, float bottom, float top) const {
+    if (top < bottom) return false;
+    auto hit = [&](size_t index) {
+        const auto& t = walls_[index];
+        if (std::max({t[2],t[5],t[8]}) < bottom ||
+            std::min({t[2],t[5],t[8]}) > top ||
+            std::min({t[0],t[3],t[6]}) > x+r || std::max({t[0],t[3],t[6]}) < x-r ||
+            std::min({t[1],t[4],t[7]}) > z+r || std::max({t[1],t[4],t[7]}) < z-r) return false;
+        // Clip a triangle to the body's vertical slab BEFORE projecting it.
+        // A sloped wall's footprint below a bridge must not block its deck.
+        struct P { float x,z,h; };
+        std::vector<P> p = {{t[0],t[1],t[2]},{t[3],t[4],t[5]},{t[6],t[7],t[8]}};
+        for (int side=0;side<2;++side) {
+            std::vector<P> q;
+            const float level = side ? top : bottom;
+            for (size_t i=0;i<p.size();++i) {
+                const P a=p[i], b=p[(i+1)%p.size()];
+                const bool ai = side ? a.h<=level : a.h>=level;
+                const bool bi = side ? b.h<=level : b.h>=level;
+                if (ai) q.push_back(a);
+                if (ai!=bi) {
+                    const float u=(level-a.h)/(b.h-a.h);
+                    q.push_back({a.x+(b.x-a.x)*u,a.z+(b.z-a.z)*u,level});
+                }
+            }
+            p.swap(q);
+            if (p.empty()) return false;
+        }
+        float area=0; bool pos=false,neg=false;
+        for (size_t i=0;i<p.size();++i) {
+            const P a=p[i],b=p[(i+1)%p.size()];
+            const float ex=b.x-a.x,ez=b.z-a.z,len=ex*ex+ez*ez;
+            const float u = len>1e-12f ? std::clamp(((x-a.x)*ex+(z-a.z)*ez)/len,0.f,1.f) : 0;
+            const float dx=x-a.x-ex*u,dz=z-a.z-ez*u;
+            if (dx*dx+dz*dz<=r*r) return true;
+            const float cross=ex*(z-a.z)-ez*(x-a.x);
+            pos |= cross>1e-6f; neg |= cross< -1e-6f;
+            area += (a.x-p[0].x)*(b.z-p[0].z)-(a.z-p[0].z)*(b.x-p[0].x);
+        }
+        return std::fabs(area)>1e-6f && !(pos&&neg);
+    };
+    for (size_t i:wideWalls_) if (hit(i)) return true;
+    for (int bx=(int)std::floor((x-r)/32);bx<=(int)std::floor((x+r)/32);++bx)
+        for (int bz=(int)std::floor((z-r)/32);bz<=(int)std::floor((z+r)/32);++bz) {
+            const auto it=wallBuckets_.find(wallKey(bx,bz));
+            if (it!=wallBuckets_.end()) for (size_t i:it->second) if (hit(i)) return true;
+        }
+    return false;
+}
+
+bool Collision::blocked(float x, float z, float r, float bottom, float top) const {
     if (bits_.empty()) return false;
     if (r < 0.0f) r = 0.0f;
+    if (std::isfinite(bottom) && std::isfinite(top))
+        return blockedHeight(x,z,r,bottom,top);
     // Grid bbox of the circle; reject early when it is fully outside.
     const float gx1 = x0_ + (float)nx_ * cell_;
     const float gz1 = z0_ + (float)nz_ * cell_;
@@ -326,33 +389,35 @@ bool Collision::blocked(float x, float z, float r) const {
     return false;
 }
 
-float Collision::sweep(float fromX, float fromZ, float toX, float toZ, float r) const {
+float Collision::sweep(float fromX, float fromZ, float toX, float toZ, float r,
+                       float bottom, float top) const {
     const float dx = toX - fromX, dz = toZ - fromZ;
     const float len = std::sqrt(dx * dx + dz * dz);
-    if (len < 1e-5f) return blocked(fromX, fromZ, r) ? 0.0f : 1.0f;
+    if (len < 1e-5f) return blocked(fromX, fromZ, r,bottom,top) ? 0.0f : 1.0f;
     const float step = std::max(0.25f, 0.5f * cell_);
     int steps = (int)(len / step) + 1;
     steps = std::min(std::max(steps, 2), 256);
     float best = 0.0f, blockedAt = 1.0f;
     for (int s = 1; s <= steps; ++s) {
         const float t = (float)s / (float)steps;
-        if (blocked(fromX + dx * t, fromZ + dz * t, r)) { blockedAt = t; break; }
+        if (blocked(fromX + dx * t, fromZ + dz * t, r,bottom,top)) { blockedAt = t; break; }
         best = t;
         blockedAt = t;
     }
-    if (best <= 0.0f && blocked(fromX, fromZ, r)) return 0.0f;
+    if (best <= 0.0f && blocked(fromX, fromZ, r,bottom,top)) return 0.0f;
     // refine between the last free and the first blocked sample
     float lo = best, hi = blockedAt;
     if (hi <= lo) return 1.0f;
     for (int it = 0; it < 10; ++it) {
         const float mid = 0.5f * (lo + hi);
-        if (blocked(fromX + dx * mid, fromZ + dz * mid, r)) hi = mid;
+        if (blocked(fromX + dx * mid, fromZ + dz * mid, r,bottom,top)) hi = mid;
         else lo = mid;
     }
     return lo;
 }
 
-bool Collision::contactNormal(float x, float z, float r, float& outNx, float& outNz) const {
+bool Collision::contactNormal(float x, float z, float r, float& outNx, float& outNz,
+                              float bottom, float top) const {
     if (bits_.empty()) return false;
     const float reach = r + cell_;
     int i0 = std::max(0, (int)std::floor((x - reach - x0_) / cell_));
@@ -368,6 +433,8 @@ bool Collision::contactNormal(float x, float z, float r, float& outNx, float& ou
         for (int j = j0; j <= j1; ++j) {
             if (!bit((size_t)i * (size_t)nz_ + (size_t)j)) continue;
             const float rz0 = z0_ + j * cell_, rz1 = rz0 + cell_;
+            if (std::isfinite(bottom) && std::isfinite(top) &&
+                !blockedHeight((rx0+rx1)*.5f,(rz0+rz1)*.5f,cell_*.71f,bottom,top)) continue;
             const float cx = std::min(std::max(x, rx0), rx1);
             const float cz = std::min(std::max(z, rz0), rz1);
             float nx = x - cx, nz = z - cz;
@@ -398,7 +465,7 @@ bool Collision::contactNormal(float x, float z, float r, float& outNx, float& ou
 }
 
 bool Collision::resolveMove(float fromX, float fromZ, float toX, float toZ, float r,
-                            float& outX, float& outZ) const {
+                            float& outX, float& outZ, float bottom, float top) const {
     if (bits_.empty()) {
         outX = toX;
         outZ = toZ;
@@ -406,7 +473,7 @@ bool Collision::resolveMove(float fromX, float fromZ, float toX, float toZ, floa
     }
     // Always sweep the segment: a fast step must not tunnel through a wall even
     // when the destination itself happens to be free.
-    float t = sweep(fromX, fromZ, toX, toZ, r);
+    float t = sweep(fromX, fromZ, toX, toZ, r,bottom,top);
     if (t >= 1.0f - 1e-4f) {
         outX = toX;
         outZ = toZ;
@@ -427,13 +494,13 @@ bool Collision::resolveMove(float fromX, float fromZ, float toX, float toZ, floa
         const float remLen = std::sqrt(remX * remX + remZ * remZ);
         if (remLen < 1e-4f) break;
         float nx = 0.0f, nz = 0.0f;
-        if (!contactNormal(px, pz, r, nx, nz)) break;
+        if (!contactNormal(px, pz, r, nx, nz,bottom,top)) break;
         const float into = remX * nx + remZ * nz;
         if (into >= 0.0f) break;                      // already moving away
         remX -= nx * into;
         remZ -= nz * into;
         if (std::sqrt(remX * remX + remZ * remZ) < 1e-4f) break;
-        const float st = sweep(px, pz, px + remX, pz + remZ, r);
+        const float st = sweep(px, pz, px + remX, pz + remZ, r,bottom,top);
         px += remX * st;
         pz += remZ * st;
         if (st >= 1.0f - 1e-4f) break;                // slid all the way

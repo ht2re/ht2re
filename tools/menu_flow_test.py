@@ -173,7 +173,10 @@ def main():
     check("all eight front-end sockets carry button art", found == 8,
           "%d/8 sockets with >200 bright px" % found)
     ver = "v 8.0 30.01.03"
-    check("the version line is drawn", True, ver)   # rendered bottom-centre
+    vx0, vx1 = int(offx + 280*scale), int(offx + 520*scale)
+    vy0, vy1 = int(offy + 580*scale), int(offy + 600*scale)
+    version_pixels = bright(rows, vx0, vy0, vx1, vy1, 140)
+    check("the version line is drawn", version_pixels > 20, f"{version_pixels} bright pixels")
 
     # Implemented option pages use their recovered LOAD.RES cards inside the
     # primary frame.  SINGLE and VIDEOPLAYER deliberately keep their useful

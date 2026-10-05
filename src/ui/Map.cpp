@@ -312,7 +312,7 @@ void Map::draw(Renderer& r, Font& labelFont, float x, float y, float w, float h,
     // 0.133 px/unit at the 800-px reference = about 1 km per 133 panel pixels.
     const float ws = kWorldPerPx * scale;
     auto wr = [&](float wx) { return x + w * 0.45f + (wx - px_) * ws; };
-    auto wz = [&](float wz) { return y + h * 0.60f + (wz - pz_) * ws; };
+    auto wz = [&](float wz) { return y + h * 0.60f + verticalOffset(wz,pz_,ws); };
 
     // --- panel wash + explored border --------------------------------------
     r.quad2D(white, x, y, w, h, kPanelR, kPanelG, kPanelB, kPanelA);
@@ -445,9 +445,8 @@ void Map::draw(Renderer& r, Font& labelFont, float x, float y, float w, float h,
     // --- the player: the original's arrow ------------------------------------
     {
         const float sx = wr(px_), sz = wz(pz_);
-        // world +x = map right, world +z = map down; the model's yaw is measured
-        // so that yaw 0 = +z, therefore the arrow's nose points down at yaw 0.
-        const float a = (yaw_ - 180.0f) * 3.14159265f / 180.0f;
+        // +x is right, +z is up: reflect the heading with the graph as well.
+        const float a = headingRadians(yaw_);
         const float cs = cosf(a), sn = sinf(a);
         const float as = scale * 800.0f / 600.0f;
         const float L = 6.0f * as, Wd = 4.0f * as;

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Build and run the Economy harness (tools/economy_selftest.cpp) and then the
 # independent Python reproduction (tools/economy_check.py).
 #
@@ -7,7 +7,7 @@
 #
 # The harness links only GameData/Sexp/Sdte/Way/Economy, so it does not depend on
 # the rest of the game compiling (useful while other modules are being edited).
-set -e
+set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p tools/out
 

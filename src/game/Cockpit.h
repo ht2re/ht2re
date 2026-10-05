@@ -42,7 +42,10 @@ public:
     int needleCount() const { return (int)needles_.size(); }
     // Current needle angle in degrees (diagnostics; 0 = the modelled zero pose).
     float needleAngleDeg(int i) const;
-    size_t triangles() const { return panelTris_ + needleTris_; }
+    size_t triangles() const { return panelTris_ + needleTris_ + wheelTris_; }
+    float wheelAngleDeg() const { return wheelAngle_; }
+    bool hasWheel() const { return wheelBatch_ >= 0; }
+    Mat4 wheelTransform(float steering) const;
 
     // Driver's eye for the cockpit camera, in vehicle-local coordinates
     // (x right, y up, z forward - the frame Vehicle::modelMatrix() maps to the
@@ -75,6 +78,10 @@ private:
     std::vector<Needle> needles_;
     std::string brand_;
     int panelBatch_ = -1;
+    int wheelBatch_ = -1;
+    Mat4 wheelPose_;
+    size_t wheelTris_ = 0;
+    float wheelAngle_ = 0;
     size_t panelTris_ = 0, needleTris_ = 0;
     bool loaded_ = false, visible_ = false;
     Mat4 place_;                 // cab -> vehicle (GL frame)

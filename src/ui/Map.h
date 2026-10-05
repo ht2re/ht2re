@@ -35,6 +35,10 @@ class Economy;
 // the screen.
 class Map {
 public:
+    static float verticalOffset(float worldZ, float playerZ, float pixelsPerUnit) {
+        return -(worldZ-playerZ)*pixelsPerUnit;
+    }
+    static float headingRadians(float yawDegrees) { return yawDegrees*3.14159265f/180.f; }
     // One labelled facility marker.
     struct Pin {
         float x = 0, z = 0;

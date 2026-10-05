@@ -248,7 +248,7 @@ static void materialColor(const std::string& mat, float rgb[3]) {
     if (has(s, "gre"))                               { set(0.26f, 0.50f, 0.28f); return; }
     if (has(s, "refl"))                              { set(0.55f, 0.62f, 0.70f); return; }
     if (has(s, "sphere") || has(s, "cayman"))        { set(0.50f, 0.58f, 0.62f); return; }
-    if (has(s, "gate") || has(s, "Zz") )             { set(0.72f, 0.66f, 0.45f); return; }
+    if (has(s, "gate") || has(s, "zz") )             { set(0.72f, 0.66f, 0.45f); return; }
     if (has(s, "window") || has(s, "glass"))         { set(0.35f, 0.45f, 0.55f); return; }
     // stable fallback: hue from the name hash, muted
     uint32_t h = 2166136261u;
