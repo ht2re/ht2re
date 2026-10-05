@@ -859,8 +859,8 @@ which vehicles exist.** No vehicle name appears anywhere in `merchandise.sch`.
 | 3 | int | variant/skin 0–3 (also selects the body colour/animation set) |
 | 4 | enum | `car`, `lorry`, `tractor`, `semitrailer` |
 | 5 | symbol or list | AI role(s): `dumb`, `trucker`, `police`, `mafia`, `none`, or `( dumb trucker )` |
-| 6 | int | mass |
-| 7 | int | price |
+| 6 | int | price |
+| 7 | int | raw F2 (hp-like; legacy VehicleDef::mass, not physical kg) |
 | 8 | list | semitrailer model names this tractor may pull (empty for cars/trailers) |
 | 9 | int (only `SEMITANK1..4`) | a flag (`1` = liquid tank) |
 
@@ -1966,8 +1966,8 @@ that the engine qualifies the consumer as `GameData::…`).  The complete table:
 | `vehicle` | 3 | numberx217 | variant |
 | `vehicle` | 4 | symbolx217 | class |
 | `vehicle` | 5 | listx20,symbolx138 | ai role |
-| `vehicle` | 6 | numberx158 | mass |
-| `vehicle` | 7 | numberx158 | price |
+| `vehicle` | 6 | numberx158 | price |
+| `vehicle` | 7 | numberx158 | raw F2 (hp-like) |
 | `vehicle` | 8 | listx158 | trailers |
 | `vehicle` | 9 | numberx4 | flag |
 | `ambush` | 1 | symbolx87 | Ambush.id |

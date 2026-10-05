@@ -62,8 +62,17 @@ def num(node, i, default=0):
     k = node[i]
     if not isinstance(k, Sexp) or not k.is_atom or k.quoted:
         return default
+    token = k.text
+    if '#' in token:
+        if token.count('#') != 1:
+            return default
+        pos = token.index('#')
+        token = token[:pos] + ('' if token[pos + 1:pos + 2] in ('e', 'E') else 'e') + token[pos + 1:]
+    if not token or not set(token) <= set('0123456789+-.eE'):
+        return default
     try:
-        return float(k.text.replace('#', 'e'))
+        value = float(token)
+        return value if math.isfinite(value) else default
     except ValueError:
         return default
 
@@ -252,6 +261,12 @@ def main():
             nodes.update(read_way(os.path.join(env, f)))
 
     cargo = load_cargo(os.path.join(data, 'merchandise.sch'))
+    wages = cargo.get('C_WAGES', {})
+    if (len(cargo) != 107 or wages.get('sell') != 1000000 or
+            wages.get('buy') != 0 or wages.get('tags') != ['cars', 'formafia']):
+        print('FAIL: cargo count / C_WAGES million-unit price / carrier tags', file=sys.stderr)
+        return 1
+    print('ok: 107 cargo records; C_WAGES sell=1000000, tags=cars,formafia')
     vehicles = load_vehicles(os.path.join(data, 'evehicles.sch'))
     vd = load_vd_names(os.path.join(data, 'vd.sch'))
     counters = load_counters(os.path.join(env, 'GAME.CNF'))

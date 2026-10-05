@@ -2,8 +2,42 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cmath>
+#include <cerrno>
 
 namespace ht2 {
+
+namespace {
+bool gameNumber(const Sexp* e, double& value) {
+    if (!e || !e->isAtom() || e->quoted || e->text.empty()) return false;
+    std::string text = e->text;
+    const size_t hash = text.find('#');
+    if (hash != std::string::npos) {
+        if (text.find('#', hash + 1) != std::string::npos) return false;
+        if (hash + 1 < text.size() && (text[hash + 1] == 'e' || text[hash + 1] == 'E'))
+            text.erase(hash, 1);
+        else text[hash] = 'e';
+    }
+    // Reject identifiers, hexadecimal literals and whitespace accepted by strtod.
+    if (text.find_first_not_of("0123456789+-.eE") != std::string::npos) return false;
+    char* end = nullptr;
+    errno = 0;
+    const double result = strtod(text.c_str(), &end);
+    if (end == text.c_str() || !end || *end || errno == ERANGE || !std::isfinite(result))
+        return false;
+    value = result;
+    return true;
+}
+} // namespace
+
+bool Sexp::isGameNumber(size_t i) const {
+    double value = 0;
+    return gameNumber(at(i), value);
+}
+
+double Sexp::gameNum(size_t i, double def) const {
+    double value = 0;
+    return gameNumber(at(i), value) ? value : def;
+}
 
 std::string Sexp::head() const {
     if (kind != List || kids.empty() || kids[0].kind != Atom) return std::string();

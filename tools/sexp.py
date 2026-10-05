@@ -314,8 +314,8 @@ def canonical_number(tok):
 def game_number(tok):
     """The value the *game* reads, i.e. with `#` as the exponent marker.
 
-    king.exe's own number reader accepts `1#e+006` (see GameData::numWithHash and
-    Economy::numLoose, which both map `#` to `e`), so this returns 1000000.
+    Authored `1#e+006` denotes 1000000. C++ Sexp::gameNum handles the same
+    spelling; the strict accessor intentionally leaves it non-numeric.
     """
     if tok is None:
         return None

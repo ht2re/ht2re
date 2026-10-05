@@ -21,8 +21,8 @@ struct FieldRef { const char* head; int index; const char* consumer; };
 const FieldRef kConsumers[] = {
     {"vehicle", 1, "GameData::VehicleDef.name"}, {"vehicle", 2, "VehicleDef.model"},
     {"vehicle", 3, "VehicleDef.variant"}, {"vehicle", 4, "VehicleDef.klass"},
-    {"vehicle", 5, "VehicleDef.aiKind"}, {"vehicle", 6, "VehicleDef.mass"},
-    {"vehicle", 7, "VehicleDef.price"}, {"vehicle", 8, "trailers (unused)"},
+    {"vehicle", 5, "VehicleDef.aiKind"}, {"vehicle", 6, "VehicleDef.price"},
+    {"vehicle", 7, "VehicleDef.mass (raw F2)"}, {"vehicle", 8, "trailers (unused)"},
     {"vehicle", 9, "tank flag (unused)"},
     {"node", 1, "Bay.name -> .way RNOD"},
     {"node", 2, "Bay.role / Bay.flags (unload|1 hidden|2 fuel|4 dummy|8)"},
@@ -247,18 +247,6 @@ void GameData::ingest(const Doc& d) {
 
         // `Sexp::isNumber(i)` indexes a *list*'s children, so it is always
         // false for an atom.  These two helpers test an arbitrary node.
-        // "1#e+006" occurs once in merchandise.sch (C_WAGES); '#' stands for 'e'
-        static double numWithHash(const std::string& t) {
-            char* end = nullptr;
-            double v = strtod(t.c_str(), &end);
-            if (end && *end == '#') {
-                std::string fixed = t;
-                fixed[t.find('#')] = 'e';
-                v = strtod(fixed.c_str(), &end);
-            }
-            return v;
-        }
-
         static long lastNumber(const Sexp& e) {
             long v = 0;
             bool got = false;
@@ -447,19 +435,30 @@ void GameData::ingest(const Doc& d) {
                 t.fuelDepot = !t.petrol && t.display.empty() &&
                               t.id.find("_FUEL") != std::string::npos;
                 if (!t.id.empty()) self->towns.push_back(t);
-            } else if (isCargo && depth == 1 && e.kids.size() >= 3) {
-                // ( CARGO_ID "Display" price ( carrier-class tags ) )
+            } else if (isCargo && depth == 1 && e.size() >= 8 &&
+                       e.at(4)->isList() && e.at(4)->isGameNumber(0) &&
+                       e.at(4)->isGameNumber(1)) {
+                // (ID UNIT WEIGHT VOLUME (BUY SELL FACTOR (TAGS)) F2 IDX "Display")
+                const Sexp& prices = *e.at(4);
                 Cargo cg;
                 cg.id = e.str(0);
-                cg.display = e.str(1);
-                for (size_t i = 2; i < e.size(); ++i)
-                    if (e.isNumber(i)) { cg.price = (long)e.num(i); break; }
-                for (size_t i = 2; i < e.size(); ++i) {
-                    const Sexp* t = e.at(i);
+                cg.unit = e.str(1);
+                cg.weight = (long)e.gameNum(2);
+                cg.volume = e.gameNum(3);
+                cg.price = (long)prices.gameNum(0);
+                cg.sellPrice = (long)prices.gameNum(1);
+                cg.priceFactor = prices.gameNum(2);
+                cg.secondaryFactor = e.gameNum(5);
+                cg.index = (int)e.gameNum(6);
+                cg.display = e.str(7);
+                for (size_t i = 3; i < prices.size(); ++i) {
+                    const Sexp* t = prices.at(i);
                     if (!t || !t->isList()) continue;
-                    for (size_t k = 1; k < t->size(); ++k) {
+                    for (size_t k = 0; k < t->size(); ++k) {
+                        const std::string tag = t->str(k);
+                        if (tag.empty()) continue;
                         if (!cg.tags.empty()) cg.tags += ",";
-                        cg.tags += t->str(k);
+                        cg.tags += tag;
                     }
                 }
                 if (!cg.id.empty() && cg.id[0] != '(') self->cargo.push_back(cg);

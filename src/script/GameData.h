@@ -25,8 +25,8 @@ public:
         int variant = 0;
         std::string klass;     // car / truck / tractor / lorry ...
         std::string aiKind;    // dumb / trucker / police / mafia ...
-        long mass = 0;
-        long price = 0;
+        long mass = 0;         // legacy name: raw evehicles F2, NOT physical kg
+        long price = 0;        // evehicles field 6 (F1)
     };
     struct Doc {
         std::string path;
@@ -100,8 +100,16 @@ public:
         bool petrol = false, fuelDepot = false, hasUnload = false;
     };
     std::vector<Town> towns;
-    // merchandise.sch: cargo items (id, display name, price, carrier-class tags)
-    struct Cargo { std::string id, display; long price = 0; std::string tags; };
+    // merchandise.sch: preserve authored per-unit data, not truckload quantities.
+    struct Cargo {
+        std::string id, display;
+        long price = 0;                   // purchase price (legacy accessor)
+        std::string tags;
+        std::string unit;
+        long sellPrice = 0, weight = 0;
+        double volume = 0, priceFactor = 0, secondaryFactor = 0;
+        int index = 0;
+    };
     std::vector<Cargo> cargo;
     // names.sch: the AI drivers (name, gender, role)
     struct Person { std::string name, gender, role; };

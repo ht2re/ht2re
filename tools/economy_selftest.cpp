@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <dirent.h>
 #include <map>
 #include <string>
@@ -62,6 +63,38 @@ int main(int argc, char** argv) {
     ec.init(gd);
 
     printf("report: %s\n", ec.report().c_str());
+    // Remove only the cargo document: all other economic inputs stay identical.
+    // The typed-table fallback must preserve every generated job field.
+    GameData typed;
+    bool fallbackLoaded = true;
+    for (const auto& d : gd.documents())
+        if (d.path.find("merchandise") == std::string::npos)
+            fallbackLoaded = typed.loadFile(d.path) && fallbackLoaded;
+    typed.cargo = gd.cargo;
+    Economy fallback;
+    fallback.setWayNodes(nodes);
+    fallback.init(typed);
+    bool same = fallback.jobs().size() == ec.jobs().size();
+    for (size_t i = 0; same && i < ec.jobs().size(); ++i) {
+        const auto& a = ec.jobs()[i];
+        const auto& b = fallback.jobs()[i];
+        same = a.cargoId == b.cargoId && a.cargoName == b.cargoName &&
+               a.fromNode == b.fromNode && a.toNode == b.toNode &&
+               a.weight == b.weight && a.volume == b.volume && a.reward == b.reward &&
+               a.mafia == b.mafia && a.illegal == b.illegal;
+    }
+    check(fallbackLoaded && same && fallback.stats().cargoFromGameData == 107,
+          "all cargo jobs match document and GameData fallback paths");
+    size_t wageJobs = 0;
+    bool wagePrices = true;
+    for (const auto& j : ec.jobs()) if (j.cargoId == "C_WAGES") {
+        ++wageJobs;
+        long expected = (long)std::llround(Economy::kRewardValueFrac * 1000000 *
+                                         (1.0 + j.distance / 1000.0));
+        expected = std::max(Economy::kRewardMin, std::min(Economy::kRewardCap, expected));
+        wagePrices = wagePrices && j.reward == expected && j.weight == 50 && j.mafia;
+    }
+    check(wageJobs > 0 && wagePrices, "C_WAGES jobs use million-unit sell price (port reward formula)");
     check(ec.stats().jobsResolved > 0, "jobs resolved to real .way nodes",
           std::to_string(ec.stats().jobsResolved) + " resolved, " +
               std::to_string(ec.stats().jobsUnresolved) + " unresolved");

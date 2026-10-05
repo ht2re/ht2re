@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <dirent.h>
 #include <map>
 #include <string>
@@ -99,6 +100,44 @@ int main(int argc, char** argv) {
         fputs(gd.coverageText().c_str(), stdout);
         return 0;
     }
+
+    // Authored exponent spellings and malformed tokens must not become prefixes.
+    std::vector<Sexp> numbers;
+    check(parseSexp("(1#e+006 1#006 1#E-2 0.0 -0 1e3 1#e+006junk 1##6 1e+ nan inf 1e9999 \"12\" () 0x10)", numbers),
+          "number fixture parses");
+    if (!numbers.empty()) {
+        const Sexp& n = numbers[0];
+        check(n.gameNum(0) == 1000000 && n.gameNum(1) == 1000000 &&
+              std::fabs(n.gameNum(2) - .01) < 1e-12 && n.gameNum(5) == 1000,
+              "game exponent spellings preserve complete values");
+        check(!n.isNumber(0) && n.isGameNumber(3) && n.isGameNumber(4),
+              "strict syntax unchanged; fractional and signed zero accepted");
+        bool rejected = !n.isGameNumber(100) && n.gameNum(100, -7) == -7;
+        for (size_t i = 6; i < n.size(); ++i)
+            rejected = rejected && !n.isGameNumber(i) && n.gameNum(i, -7) == -7;
+        check(rejected, "invalid, quoted, nonfinite and incomplete game numbers rejected");
+    }
+    auto cargo = [&](const char* id) -> const GameData::Cargo* {
+        for (const auto& c : gd.cargo) if (c.id == id) return &c;
+        return nullptr;
+    };
+    const auto* bread = cargo("BREAD");
+    check(gd.cargo.size() == 107 && bread && bread->display != "CRATE" &&
+          bread->unit == "CRATE" && bread->weight == 25 && bread->price == 25 &&
+          bread->sellPrice == 70 && std::fabs(bread->volume - .1) < 1e-6 &&
+          bread->tags == "trucks" && bread->index == 71,
+          "all 107 cargo records loaded; BREAD fields and first tag preserved");
+    const auto* vodka = cargo("VODKA");
+    check(vodka && vodka->price == 272 && vodka->sellPrice == 1000 &&
+          vodka->tags == "trucks,formafia", "VODKA retains carrier and mafia tags");
+    const auto* wages = cargo("C_WAGES");
+    check(wages && wages->price == 0 && wages->sellPrice == 1000000 &&
+          wages->weight == 50 && wages->tags == "cars,formafia",
+          "C_WAGES retains million-unit sell price and car tag");
+    const auto* diamond = cargo("RDIAMOND");
+    check(diamond && std::fabs(diamond->priceFactor - .6) < 1e-6 &&
+          std::fabs(diamond->secondaryFactor - .95) < 1e-6,
+          "distinct authored cargo coefficients remain distinct");
 
     size_t tiles = 0;
     std::vector<ScriptNodePos> nodes = loadWayNodes(data, tiles);

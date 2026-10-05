@@ -48,8 +48,8 @@ if (d >= 0 && economy_.buy(index)) respawnTruck(economy_.playerModel(), economy_
 ( vehicle  NAME  "MODEL"  VARIANT  CLASS  AI_KIND  F1  F2  ( TRAILERS… )  [TANK] )
 ```
 
-`GameData::VehicleDef` calls `F1` *mass* and `F2` *price* (docs/script_gameplay.md
-§5.9 does the same).  The shipped values say the opposite, so this module reads
+Current `GameData::VehicleDef` reads `F1` into `price`; `mass` is a legacy
+name for raw `F2`, not physical kilograms. Both parsing paths read
 **`F1` = price** and **`F2` = a per-model power/mass figure** (exposed as
 `Offer::power`, unused by the economy):
 
@@ -62,10 +62,9 @@ if (d >= 0 && economy_.buy(index)) respawnTruck(economy_.playerModel(), economy_
 | game economy | 22000–118000 for a truck, i.e. 10–50 cargo runs | 90–700 would be bought after one delivery |
 | manual (*Замена машины*) | shows “… модель, **мощность**, грузоподъёмность и **стоимость**” per car | 408 hp for a Fiat is a data default, not a mass |
 
-`Economy` therefore does **not** use `GameData::VehicleDef::price` (which is `F2`,
-408 for a Fiat); it re-reads the record from `GameData::documents()`, exactly like
-the price field appears in the file, and falls back to `GameData::vehicles` only
-when the documents are unavailable (reported as `cargo=…(GameData fallback)`).
+`Economy` re-reads vehicle records from `GameData::documents()`; the typed
+`GameData::VehicleDef::price` now agrees with field 6. The cargo fallback
+(`cargo=…(GameData fallback)`) is a separate path, not a vehicle fallback.
 Offers come from every entry with price > 0: **147 of 158** (the 11
 semitrailers have price 0 and are not for sale; the manual says they are picked
 up free at the roadside).
@@ -111,12 +110,19 @@ and counted (goods refs 115, 4 of them repeats inside one town list).
 * `TOWN_AD` lists `c_TABLEWARE` while `merchandise.sch` spells `C_TABLEWARE` — the
   lookup falls back to a case-insensitive match (it is the car version of the
   truck item `TABLEWARE` listed in the same town).
-* `C_WAGES`'s sell price is written `1#e+006` in `merchandise.sch`; `#` stands for
-  the exponent marker, so the value is 1 000 000 (`strtod` alone would read 0 and
-  drop the item).  This is the only `#` number in the whole script set.
-* `merchandise.sch` escapes a quote (`"Телевизор 14\""`); `Sexp.cpp` handles it
-  (107 items), `tools/sexp.py` does not — `tools/economy_check.py` patches its
-  tokenizer so both sides agree.
+* `C_WAGES`'s sell price is written `1#e+006`: the complete value is 1 000 000.
+  `strtod` alone would accept the prefix 1. C++ `Sexp::gameNum` now handles
+  this spelling, rejects malformed/nonfinite tokens, and leaves strict `num`
+  syntax unchanged. The Python economic checker independently normalizes it
+  and explicitly checks the million-unit price.
+* `merchandise.sch` escapes a quote (`"Телевизор 14\""`); both `Sexp.cpp`
+  and `tools/sexp.py` handle it (107 items).
+
+`GameData::Cargo` preserves unit, weight, volume, buy (`price`), `sellPrice`,
+both distinct coefficients, index, display and all carrier tags. Coefficients
+are retained as data, not applied using a guessed original formula. The two
+Economy cargo paths are checked against all 1110 generated jobs. This also
+fixes the previously skipped first `trucks`/`cars` tag in the C++ document path.
 
 **Reward.** Per the manual the payment is a share of the cargo's value plus what
 the distance costs, so:
@@ -169,9 +175,8 @@ bazaars** resolve to a `.way` node (0 unresolved), e.g.
 `dealerNear(x, z, r)` returns the stall the player is standing at.  Every dealer
 offers the same catalogue (`offers()`); `buy(index)` is the transaction.
 
-`GameData::Parking::tile` is always empty — `GameData::ingest()` builds its
-`Walker` with an aggregate initialiser that omits the `tile` member — so the tile
-in `Economy::Dealer::tile` is read from the script path instead.
+`GameData::Parking::tile` is populated by the current Walker.
+`Economy::Dealer::tile` prefers it and retains a script-path fallback.
 
 ## 5. Numbers on the shipped data
 
@@ -281,17 +286,13 @@ rewards 259…250000, 15 dealers).
 
 ## 8. What is not resolved
 
-* **Field names.** `F1 = price` is well supported (§2) but the project spec calls
-  `F2` “mass”; the game's dealer board shows *power* and *payload*.  `F2` is
-  exposed but unused, so nothing depends on the answer.  `GameData::VehicleDef`
-  keeps its own (swapped) `mass`/`price` — worth fixing there, not here.
-* **`GameData::Cargo` is parsed from the wrong fields**: `display` is the unit
-  (`CRATE`) and `price` is the weight (`25`), not the display name and
-  `PRICE_BUY`.  This module re-reads `merchandise.sch` itself, so its own cargo
-  table is correct; `--scripts`/`--vehicles` still print the GameData values.
-* **No time limit / penalties / damage.** The manual's job deadline, “first to
-  arrive” bonus, damage and fines are not modelled; `deliver()` pays the full
-  reward immediately.
+* **Field names.** `F1 = price` is well supported (§2); the remaining legacy
+  `VehicleDef::mass` name represents raw F2. Do not interpret it as physical
+  mass; `vehicle.tech` supplies that independently.
+* **Exact deadlines / penalties / damage.** Current port has a contract clock
+  and a late-payment deduction, but these rules are port approximations.
+  Original deadlines, competition bonus, cargo damage and fines still need
+  reconstruction and comparison with the original.
 * **Reward tuning is a design choice**, not a shipped formula: the shipped data
   has no per-job price.  The 0.20 share, the +1 per-km factor, the floor of 500
   and the cap of 250000 are documented above and live in `Economy.h`.
@@ -299,8 +300,6 @@ rewards 259…250000, 15 dealers).
   (`illegal`, `formafia`) are carried on each job for the parent to use.
 * **Fuel and repairs are out of scope**: `restable.sch` prices (including
   `PR_FUEL 100`) stay in `GameData::upgrades` for the parent.
-* **`GameData::Parking::tile` is always empty** (aggregate-init bug) — worked
-  around here by reading the tile from the script path.
 * The dispatcher screenshot (`king.chm`) shows orders whose cargo is *not* traded
   by the local town (e.g. Яйца at Южный); the real generator therefore also
   considers the destination town's demand.  This module's rule (source goods ×

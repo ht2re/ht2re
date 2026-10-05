@@ -54,21 +54,13 @@ bool hasIdentHead(const Sexp& e) {
 
 // merchandise.sch spells one number `1#e+006` (C_WAGES' sell price, i.e. the
 // 1,000,000 wage transfer).  The game's own number reader accepts it, strtod
-// stops at '#', so read the atom leniently: `#` becomes `e`.
+// stops at '#'; use the shared full-token game-data accessor.
 double numLoose(const Sexp* e, size_t i) {
-    if (!e) return 0.0;
-    const Sexp* a = e->at(i);
-    if (!a || a->kind != Sexp::Atom || a->quoted || a->text.empty()) return 0.0;
-    std::string t = a->text;
-    for (auto& c : t)
-        if (c == '#') c = 'e';
-    char* end = nullptr;
-    double v = strtod(t.c_str(), &end);
-    return (end && end != t.c_str()) ? v : 0.0;
+    return e ? e->gameNum(i) : 0.0;
 }
 
 bool isNumberLoose(const Sexp* e, size_t i) {
-    return numLoose(e, i) != 0.0 || (e && e->at(i) && e->at(i)->text == "0");
+    return e && e->isGameNumber(i);
 }
 
 } // namespace
@@ -192,7 +184,7 @@ void Economy::buildCatalog(const GameData& gd) {
                 for (size_t i = 3; i < pb->size(); ++i) {
                     const Sexp* t = pb->at(i);
                     if (!t || !t->isList()) continue;
-                    for (size_t k = 1; k < t->size(); ++k) {
+                    for (size_t k = 0; k < t->size(); ++k) {
                         std::string tag = lowerOf(t->str(k));
                         if (tag.empty()) continue;
                         if (!c.tags.empty()) c.tags += ",";
@@ -244,9 +236,12 @@ void Economy::buildCatalog(const GameData& gd) {
             c.id = g.id;
             c.display = g.display.empty() ? g.id : g.display;
             c.buy = g.price;
-            c.sell = g.price;
+            c.sell = g.sellPrice;
+            c.weight = g.weight;
+            c.volume = (float)g.volume;
             c.tags = g.tags;
-            c.truckOk = g.tags.find("trucks") != std::string::npos;
+            c.truckOk = g.tags.find("trucks") != std::string::npos ||
+                        g.tags.find("fuel") != std::string::npos;
             c.carOk = g.tags.find("cars") != std::string::npos;
             c.illegal = g.tags.find("illegal") != std::string::npos;
             c.mafia = g.tags.find("formafia") != std::string::npos;
@@ -286,8 +281,8 @@ void Economy::buildCatalog(const GameData& gd) {
 
 // The car dealers of the manual sit on the bazaar parking lots; the trade stall
 // is the bay with role 4 (it also names the town).  Positions come from .way.
-// GameData::Parking::tile is always empty (its Walker aggregate initialiser
-// drops the field), so the tile is read from the script path here.
+// Prefer GameData::Parking::tile, retaining the document-path fallback for
+// data assembled by older callers.
 void Economy::buildDealers(const GameData& gd) {
     std::map<std::string, std::string> tiles;      // parking id -> ENV tile
     for (const auto& d : gd.documents()) {

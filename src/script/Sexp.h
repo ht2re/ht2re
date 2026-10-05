@@ -28,6 +28,10 @@ struct Sexp {
     std::string str(size_t i, const std::string& def = std::string()) const;
     double num(size_t i, double def = 0.0) const;
     bool isNumber(size_t i) const;
+    // Authored game-data numbers also use 1#e+006 (and 1#006).
+    // Unlike strtod prefix parsing, these require a complete finite number.
+    double gameNum(size_t i, double def = 0.0) const;
+    bool isGameNumber(size_t i) const;
     // debug
     std::string dump(int depth = 0) const;
 };

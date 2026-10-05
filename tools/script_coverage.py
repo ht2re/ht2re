@@ -187,7 +187,7 @@ CONSUMERS = {
     "PR_HEADLIGHT_PROTECTION": {1: "level 0", 2: "level 1"},
     "PR_FUEL":           {1: "level 0", 2: "level 1"},
     "vehicle": {1: "id", 2: "model", 3: "variant", 4: "class", 5: "ai role",
-                6: "mass", 7: "price", 8: "trailers", 9: "flag"},
+                6: "price", 7: "raw F2 (hp-like)", 8: "trailers", 9: "flag"},
 }
 
 # heads that are grammar forms (not data)
