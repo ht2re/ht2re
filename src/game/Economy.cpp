@@ -514,6 +514,30 @@ bool Economy::buy(size_t index, long tradeInCredit) {
     return true;
 }
 
+bool Economy::restorePlayerModel(const std::string& model) {
+    if (model.empty()) return false;
+    for (auto& o : offers_) {
+        if (o.model != model) continue;
+        o.owned = true;
+        playerModel_ = o.model;
+        playerId_ = o.id;
+        playerVariant_ = o.variant;
+        return true;
+    }
+    return false;
+}
+
+void Economy::restoreProgress(size_t delivered, int activeJobIndex) {
+    delivered_ = delivered;
+    for (Job& j : jobs_) {
+        j.active = false;
+        j.done = false;
+        j.timeLeft = j.timeLimit;
+    }
+    if (activeJobIndex >= 0 && (size_t)activeJobIndex < jobs_.size())
+        jobs_[(size_t)activeJobIndex].active = true;
+}
+
 int Economy::dealerNear(float x, float z, float radius) const {
     int best = -1;
     float bestD = radius;

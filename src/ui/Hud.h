@@ -64,6 +64,8 @@ public:
     float windowX(const Renderer& r) const;
 
     void draw(Renderer& r, Font& font, const Values& v);
+    // Original 1600x50 PAUSE strip drawn while an ESC page/panel owns input.
+    void drawPause(Renderer& r);
 
     // --- speed camera / fine panel -----------------------------------------
     // The retail data ships the *sound* of the camera (`snd\photo.wav`) and a
@@ -97,6 +99,7 @@ private:
     unsigned pagerA_ = 0;     // m16\pager_a.msk (new-message icon)
     unsigned pagerTex_ = 0, pagerATex_ = 0;
     unsigned flashTex_ = 0;   // txr\flash.txr (COMMON.RES): the camera flash
+    unsigned pauseTex_ = 0;   // m16\pause.msk (COMMON/esc16.RES)
     unsigned chromeTop_ = 0, chromeSide_ = 0;   // strips cut out of the tablo art
     // the original HUD fonts (matrix.fon labels 7x12, icon.fon numbers 25x30);
     // their glyphs sit at ASCII + 0x10

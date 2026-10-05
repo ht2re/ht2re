@@ -4,7 +4,9 @@
 
 ## Стек
 - **C++17**, **CMake ≥ 3.16**, **SDL2**, **OpenGL 3.3 core** (macOS/Linux/Windows)
-- Опционально позже: SDL_mixer (звук), PhysX/Bullet (физика), Lua/собственный Scheme (скрипты)
+- Опционально позже: SDL_mixer (звук), PhysX/Bullet (физика), Lua для скриптов
+  (данные `.sch` уже транслируются в Lua: `tools/sch2lua.py`, проверка —
+  `tools/sch2lua_check.sh`, разбор — `docs/script_gameplay.md` §15)
 - Сборка: `cmake -B build && cmake --build build -j`
 
 ## Карта оригинальных модулей king.exe → новый движок

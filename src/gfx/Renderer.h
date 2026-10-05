@@ -39,6 +39,20 @@ public:
     // ground texture + how many triangles at the start of the terrain VAO use it
     void setGroundTexture(unsigned t) { groundTex = t; }
     void setUseRawTerrain(bool b) { useRawTerrain = b; }
+
+    // ---- generated-ground height query (measurement / diagnostics) --------
+    // Exact height of the mesh buildFineGroundMesh() uploaded, evaluated with
+    // the very same code path (raw heightmap + GroundMap ceiling + margin, and
+    // the exact triangle split of every cell), so a probe can compare the drawn
+    // ground against the road surface without ray-casting the GPU buffers.
+    // Returns false when the point is outside the mesh.  `--terrain` makes it
+    // answer for the raw 415-unit mesh instead (the measurement's control).
+    bool groundHeightAt(float x, float z, float& outY) const;
+    // Cell size of the generated ground mesh (16 units) / of the raw fallback.
+    float groundCellSize() const;
+    // Margin (in units) the clamp keeps between the tile surface and the ground
+    // mesh, as a function of the distance to the nearest covered tile cell.
+    static float profileMargin(float dist);
     // B3D scene (menu city / world tile). buildSceneMesh() is called by init()
     // and lazily by setScene(); keeps the GL objects in this class.
     void setScene(const B3D* s, const SceneTextures* tex = nullptr);
@@ -94,11 +108,12 @@ public:
     // Weight of the directional (sun) term: rain and snow are overcast.
     void setSunAmount(float a) { sunAmount = a < 0.0f ? 0.0f : (a > 1.0f ? 1.0f : a); }
     float sunAmountValue() const { return sunAmount; }
-    // Camera near plane (default 2.0 = the original value).  The cockpit view
-    // sits inside the cab, less than 2 units from the dashboard, so it lowers
-    // this; every other mode keeps the default and is unaffected.
+    // World near plane is 2.0. The nearby loaded cockpit is rendered separately
+    // with 0.4 after clearDepth(), without reducing the world's depth precision.
     void setNearPlane(float n) { nearPlane = n > 0.01f ? n : 0.01f; }
     float nearPlaneValue() const { return nearPlane; }
+    // Start a foreground depth layer without erasing the rendered world colour.
+    void clearDepth();
     void setSun(float x, float y, float z) { sunX = x; sunY = y; sunZ = z; }
     void setAmbient(float a) { ambient = a; }
     void setCulling(bool on) { culling = on; }

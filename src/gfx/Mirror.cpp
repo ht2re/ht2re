@@ -302,7 +302,7 @@ void Mirror::draw(Renderer& r, const Mat4& vehicleModel) {
     const float prevNear = r.nearPlaneValue();
     const Mat4 prevModel = r.modelMatrix();
     if (r.bindRenderTarget(target_, true)) {
-        r.setNearPlane(0.4f);
+        r.setNearPlane(2.0f);       // world pass, no nearby cockpit in the mirror
         r.clearModel();
         r.draw(cam_[0], cam_[1], cam_[2], cam_[3], cam_[4]);
         r.drawScene(cam_[0], cam_[1], cam_[2], cam_[3], cam_[4]);

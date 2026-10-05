@@ -105,6 +105,9 @@ public:
     // index is bad, the vehicle is already owned, it has no price, or the money
     // (plus credit) does not cover it.
     bool buy(size_t index, long tradeInCredit = 0);
+    // Restore a saved vehicle without charging for it.  Selects the first
+    // catalogue variant with this model and marks it as owned.
+    bool restorePlayerModel(const std::string& model);
     const std::string& playerModel() const { return playerModel_; }
     const std::string& playerVehicleId() const { return playerId_; }
     int playerVariant() const { return playerVariant_; }
@@ -124,6 +127,8 @@ public:
     // Jobs whose pickup point is within `radius` of (x, z), nearest first.
     std::vector<size_t> jobsNear(float x, float z, float radius) const;
     bool accept(size_t jobIndex);                 // one active job at a time
+    // Replace the small progress subset stored by HT2RE-SAVE.
+    void restoreProgress(size_t delivered, int activeJobIndex);
     // Called with the current position: completes an active job at its drop-off.
     bool deliver(float x, float z, float radius, long* rewardOut);
     const Job* activeJob() const;

@@ -72,14 +72,20 @@ the same convention as `Vehicle`/`Renderer::rotY`). Right-hand traffic puts the
 car at
 
 ```
-right = f x up = (-fz, fx)          // +Y up, right-handed
-pos   = centreline + right(heading) * (lane + shift)
+right = (fz, -fx)                  // original D3D orientation, mirrored GL projection
+pos   = centreline + right(heading) * (lane / cos(heading - tangent) + shift)
 lane  = min(laneOffset, width/3)    // laneOffset() defaults to 2 m
 ```
 
 Oncoming cars use the opposite `dir`, hence the opposite `right` vector, so they
-pass on their own side (with `dir = +1` the car is at `-x` when driving towards
+pass on their own side (with `dir = +1` the car is at `+x` when driving towards
 `+z`).
+
+The cosine correction keeps the perpendicular lane distance while its normal
+rotates through a bend (capped at 2x for sharp turns). This is a bounded miter
+offset, not a spline reconstruction of the authored asphalt or its markings.
+`tools/traffic_lane_test.cpp` checks both travel directions, the actual mirrored
+projection and continuity through left/right 45- and 90-degree bends.
 
 `shift` is the *lateral pushback* a contact leaves behind (clamped to ±1.2 m,
 relaxed at 2.5 /s once the car is free again). It is the only way a car ever
@@ -205,6 +211,22 @@ that meet at a vertex need not agree on the height, and the raw spawn/relocation
 could place a car at a completely different height: the blend makes the profile
 continuous by construction, and a relocated car resets its own height reference.
 Measured: 0 steps > 0.5 m, max 0.05 m per frame at every density.
+
+`c.h` is also the height the car is **drawn** at.  `App::drawTraffic` used to
+replace it with `GroundMap::heightAt()` whenever the two were within 4 m; that
+map is a *terrain* field which, under a carriageway, sits several metres below the
+asphalt (docs/terrain_road.md §8), so the substitution was the "cars fly / sink"
+complaint.  It now keeps the graph height and only falls back to the map's **road
+profile** (`GroundMap::surfaceAt()`, the `.way` points averaged per cell) when the
+graph carries no height at all.  Measured with `--traffic-wheel-probe 8` (the real
+simulation at 10/25/40/64 cars, each car's four wheel contact points ray cast
+against the authored asphalt): 83,740 wheel samples, mean +0.004 m, median 0.000 m,
+p95 0.000 m, max 1.612 m, none over 5 m.  The player's truck got the same
+treatment: `Vehicle` follows `GroundMap::roadProfileAt()`, the exact `.way`
+profile, where it is on a road (measured max 0.000 m over a driven route and a
+worst vertical step of 0.133 m per frame; with `HT2_NO_ROAD_PROFILE=1`, i.e. the
+old terrain-field ground following, the same route measures a mean of +0.962 m,
+a p95 of 4.850 m and a max of 8.235 m).
 
 ## 7. Collisions (car bodies, contacts, damage)
 
@@ -502,3 +524,47 @@ struct Stats {
 `Collision` (world geometry, `docs/collision.md`) additionally exposes the
 capsule helpers used above: `Body`, `bodyAxis()`, `blockedBody()`,
 `resolveBody()`, `bodyOverlap()`.
+
+---
+
+## 14. The original AI route / junction rules — what the exe gave, and what it did not
+
+Task: recover the original's lane/turn/give-way/stop rules and diff them against
+the model in §1–§12.  Everything below is what `original/king.exe` actually
+yields; where a rule could not be found it says so and the port's rule stands.
+
+### 14.1 What was searched and what was found
+
+| target | search | result |
+|--------|--------|--------|
+| the per-vehicle route table | the AI debug strings `_Vehicle::run end/lorry/car/tractor` (0x6729e0/0x6729f4/0x672a30/0x672a44), referenced at 0x4d10ee/0x4d2487/0x4d2431/0x4d26b8; `made_fsm: NUM_W=%d(<3) numberTech=%d techfile=%s section=%s section_tech=%s node=%s` (0x67468c) pushed at 0x4ef54a | `made_fsm` (fcn.004ef480) is the *vehicle* FSM: it indexes a tech record by `[this+0x8cc]` with the 2416-byte stride (`0x4ef519..0x4ef525` computes `idx*151*16`) and dispatches on `[this+0xdd4]` (numtech) to fcn.004ef210/240/280/2d0/330. **It is the drivetrain/tech FSM, not the road-route FSM** |
+| the corner/curvature model | fcn.004ef330 (the cross-product loop at `0x4ef38b..0x4ef3f1`, invoked with two stride-12 3-vector arrays) | this is the **collision hull** builder: the two arrays are `Corner_Mark_%d` points (0x674db0, read at `0x509422` and `0x50ac30` in the tech readers) and the routine takes their cross products and lengths. Not route corners |
+| the lane width / lateral offset | `strings -a original/king.exe` for `lane`, `width`, `wdth`, `reduc`, `offset`; the `.way` loader at 0x488990; `RoadWidthReducement` | **nothing.** `RoadWidthReducement`, `friction_coeff`, `steering_sence`, `idle_steering` do **not exist as strings** in this build's `king.exe` — `TRUCK.INI [CAR]` is a leftover from another version, so it cannot be the source of the port's `min(laneOffset, width/3)` |
+| the give-way / junction reservation | a per-junction occupancy flag, "distance to the car ahead vs a constant" near the traffic update | **nothing conclusive.** The only junction-adjacent recovered code is `ObstaclesTask` (0x434f2d/0x42b3a0), which is the *road-closure* scheduler, not AI give-way |
+| the corner blend window / turn speed cap | a constant compared against a turn angle or an edge length in the AI update | **nothing.** No `min(6 m, len/2)`-shaped constant could be located without first identifying the AI update, and the AI update could not be separated from the `_Vehicle`/`_Car_V` drivetrain code within the budget |
+
+### 14.2 Verdict
+
+**The exe gave nothing for the lane offset, the turn-speed cap, the give-way
+rule and the corner blend window.**  The port's model (§2, §3) therefore stands
+unchanged, and its measured invariants are unchanged by this pass:
+
+```
+traffic: graph 6172 v / 6447 e ... 40 cars (5 models)
+traffic-report: mean speed 8.49 m/s (30.6 km/h) over 8486 m driven
+traffic-report: U-turns 0 (invariant), dead-end turn-arounds 0
+traffic-report: off-road frames 0 of 59960 (0.000%) > 2.0 m off the lane,
+                pose jumps 2 (max 1.88 m), height steps >0.5 m 0 (max 0.05 m)
+traffic-report: contacts 12 (car-vs-car 12, car-vs-player 0), junction hits 12,
+                overlap pair-frames 37, min inter-car gap -0.80 m
+```
+
+### 14.3 One data-side check that *was* possible
+
+The lane rule depends on the RSEG `WDTH`; the shipped widths (clamped 2.5..40 m,
+8 m fallback, §1) put `min(laneOffset, width/3)` at the 2 m `laneOffset` for
+every road wider than 6 m, so the "width/3" term only bites on the narrowest
+tracks.  That is a property of the shipped data, not a recovered rule, and it is
+why the port's lane behaviour is insensitive to the choice between `width/2`,
+`width/3` and a fixed 2 m on the main roads.  Anything finer needs the original
+AI update, which this pass could not isolate.

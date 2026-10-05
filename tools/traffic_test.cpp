@@ -62,6 +62,10 @@ int main(int argc, char** argv) {
     tr.setPathfinding(pathfinding);
     tr.build(segs, nodes);
     tr.setModels({0, 1, 2, 3, 4});
+    const bool freightTest = argc > 5 && atoi(argv[5]) != 0;
+    if (freightTest) {
+        for (int model = 0; model < 5; ++model) tr.setFreightModel(model, model >= 3);
+    }
     tr.spawn(px, pz, radius, wantCars);
 
     std::printf("mode: %s | graph: %zu vertices, %zu edges | waypoints %zu/%zu resolved\n",
@@ -87,6 +91,11 @@ int main(int argc, char** argv) {
         const auto& cars = tr.cars();
         for (size_t i = 0; i < cars.size(); ++i) {
             const auto& c = cars[i];
+            if (freightTest && c.model < 3 && (tr.edgeAttr(c.edge) & 0x30) == 0x30) {
+                std::printf("FAIL passenger car entered loading road: model %d attr %d\n",
+                            c.model, tr.edgeAttr(c.edge));
+                return 2;
+            }
             float dy = c.yaw - prevYaw[i];
             while (dy > 180.0f) dy -= 360.0f;
             while (dy < -180.0f) dy += 360.0f;

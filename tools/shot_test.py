@@ -133,7 +133,7 @@ check("version string rendered", txt > 60, f"{txt} px")
 # derived from them; the truck is COMMON/TRUCKS.B3D assembled via its links.
 print("world state (chase camera at the warehouse)")
 run("--scene", "world", "--screenshot", "--out", os.path.join(OUT, "world.bmp"),
-    "--spawn", "4700,-5700,180", "--warmup", "8", "--size", "1280x720")
+    "--spawn", "4700,-5700,180", "--warmup", "8", "--view", "chase", "--size", "1280x720")
 w, h, px = read_bmp(os.path.join(OUT, "world.bmp"))
 check("resolution 1280x720", (w, h) == (1280, 720), f"{w}x{h}")
 
@@ -185,7 +185,7 @@ print("gameplay scripts (AI traffic)")
 # frame is the uniform 900 m fog colour - both made the check vacuous.  This
 # camera puts ~8 cars in frame, 0.46% of sampled pixels (4300 px).
 base = ["--scene", "world", "--spawn", "-2327,-3767,-29", "--no-map",
-        "--warmup", "4", "--traffic-radius", "200"]
+        "--warmup", "4", "--view", "chase", "--traffic-radius", "200"]
 out = run(*(base + ["--screenshot", "--out", os.path.join(OUT, "traffic.bmp"),
                     "--traffic", "16"]))
 m = re.search(r"traffic: road graph (\d+) vertices, (\d+) edges", out)
@@ -215,15 +215,20 @@ check("traffic instances reach the frame (not culled as local-space batches)",
       if m else "no 'cull:' line")
 
 # ------------------------------------------------------------ node events
-# mod_*.sch ( nodeevent ID KIND "waynode" DIR "text" ): the message fires when the
-# player drives inside the trigger radius of that .way node (the radius is an
-# engine constant - the script only carries the text).
+# mod_*.sch ( nodeevent ID KIND "waynode" DIR "text" ): king.exe fires these on
+# a road PositionId transition, then filters the link travel vector by DIR.  The
+# port associates the free-driving pose with the named .way node in a narrow
+# radius until the player vehicle exposes the original road PositionId.
 print("gameplay scripts (node events)")
 out = run("--scene", "world", "--no-map", "--screenshot",
-          "--out", os.path.join(OUT, "event.bmp"), "--spawn", "-3020,-4625,0")
+          "--out", os.path.join(OUT, "event.bmp"),
+          "--spawn", "-3125,-4525,180", "--traffic", "0")
 m = re.search(r"events: (\d+) node events \((\d+) carry a message\), (\d+) nodes resolved", out)
 check("node events parsed and resolved", bool(m) and int(m.group(1)) == 31 and m.group(1) == m.group(3),
       f"{m.group(1)} events, {m.group(3)} resolved" if m else "no line")
+check("southbound BASE03LEFT crossing fires",
+      "events: 'BASE03LEFT' (UNCONDITIONAL)" in out,
+      "direction accepted" if "events: 'BASE03LEFT'" in out else "event missing")
 w, h, rows = read_bmp(os.path.join(OUT, "event.bmp"))
 # The banner text is warm (yellowish).  With the original HUD strip loaded the
 # message is drawn inside the strip (rows ~44..90, App::drawWorld); without it
@@ -234,12 +239,15 @@ def banner_px(rows, x0=300, x1=980):
     return (count(rows, x0, x1, 44, 90, warm) + count(rows, x0, x1, 96, 138, warm))
 lit = banner_px(rows)
 check("node-event message drawn on screen", lit > 200, f"{lit} text px")
-run("--scene", "world", "--no-map", "--screenshot",
-    "--out", os.path.join(OUT, "event_off.bmp"),
-    "--spawn", "-3020,-4625,0", "--event-radius", "1")
+out_off = run("--scene", "world", "--no-map", "--screenshot",
+              "--out", os.path.join(OUT, "event_off.bmp"),
+              "--spawn", "-3125,-4525,0", "--traffic", "0")
 _, _, rows2 = read_bmp(os.path.join(OUT, "event_off.bmp"))
 lit2 = count(rows2, 300, 980, 96, 138, lambda c: c[0] > 180 and c[1] > 160 and c[2] < 220)
-check("no message without a trigger", lit2 < 60, f"{lit2} text px")
+wrong_way_fired = "events: 'BASE03LEFT'" in out_off
+check("northbound pass rejects the SOUTH event",
+      not wrong_way_fired and lit2 < 60,
+      f"event={'yes' if wrong_way_fired else 'no'}, {lit2} text px")
 
 # ---------------------------------------------------------- game scripts
 # Every shipped .sch/.CNF is SDTE encrypted; the engine decrypts and parses them
@@ -300,8 +308,9 @@ def script_harness():
 
 
 rep = script_harness()
+_hr = re.search(r"(\d+) checks, 0 failures", rep)
 check("script-rules harness builds and every recovered rule holds",
-      "27 checks, 0 failures" in rep,
+      bool(_hr) and int(_hr.group(1)) >= 27,
       [l for l in rep.splitlines() if "failures" in l][:1][0] if "failures" in rep else rep[-90:])
 
 mg = re.search(r"family=gate\s+total=(\d+) active=\d+ satisfied=(\d+) visible=\d+ kinds=(\S+)", rep)
@@ -401,8 +410,8 @@ check("repair clears the damage and charges money",
 
 # ------------------------------------------------------------------ ambushes
 print("ambushes (police / mafia roadblocks)")
-out = run("--scene", "world", "--no-map", "--spawn", "-3190,-4360,0",
-          "--camera", "-3190,34,-4390,180,-6", "--traffic", "0", "--screenshot",
+out = run("--scene", "world", "--no-map", "--spawn", "-3190,-5000,0", "--warmup", "30",
+          "--camera", "-3110,34,-4490,180,-6", "--traffic", "0", "--screenshot",
           "--out", os.path.join(OUT, "ambush.bmp"))
 m = re.search(r"ambush: (\d+) ambushes resolved from (\d+) forms", out)
 check("ambush forms resolved", bool(m) and int(m.group(1)) == 87 and m.group(2) == "87",
@@ -959,10 +968,21 @@ check("ESC НАЧАТЬ СНАЧАЛА respawns, СОХРАНИТЬ ИГРУ wri
       and "esc: savegame written to " in out and "fuel 0.42" in out
       and os.path.exists(SAVE_FILE), "restart + save file")
 saved = open(SAVE_FILE).read() if os.path.exists(SAVE_FILE) else ""
+# the fuel figure is the burn over the 3 s warm-up, so it follows the driving
+# model: assert the format exactly and the value to 2 decimals (the exact number
+# was a property of the old constant-acceleration model, see docs/physics.md)
+fm = re.search(r"fuel ([\d.]+)", saved)
+dm = re.search(r"damage ([\d.]+)", saved)
 check("save file format (HT2RE-SAVE 1 + money/pos/fuel/damage/job)",
       saved.startswith("HT2RE-SAVE 1\n") and "money 45000" in saved
-      and "pos -3020.000 -4625.000" in saved and "fuel 0.4184" in saved
-      and "damage 0.3140" in saved and "job -1" in saved, saved.splitlines()[0] if saved else "missing")
+      and "pos -3020.000 -4625.000" in saved
+      and bool(fm) and abs(float(fm.group(1)) - 0.42) < 0.02
+      # the damage figure follows the new (original) driving model as well, so
+      # it is asserted as a plausible range, not as the old literal
+      and bool(dm) and 0.15 < float(dm.group(1)) < 0.60
+      and "job -1" in saved,
+      (saved.splitlines()[0] + " fuel=" + fm.group(1) + " damage=" + dm.group(1))
+      if (saved and fm and dm) else "missing")
 out = run_env(SAVE_ENV, "--scene", "world", "--esc-screen", "load", "--esc-act", "load",
               "--screenshot", "--out", os.path.join(OUT, "esc_act_load.bmp"), "--size", "1280x720")
 check("ESC ЗАГРУЗИТЬ restores the state and resumes driving",
@@ -1047,8 +1067,11 @@ def rect_diff(a, b, x0, x1, y0, y1, step=4, tol=10):
 
 
 # Each panel paints its own dock rectangle from the real art (hundreds of
-# differing pixels) and changes *nothing* outside it: the world, the HUD strip
-# and the minimap stay exactly as they were.
+# differing pixels) and changes nothing in the world outside it.  The comparison
+# excludes the HUD/pause band and the port-only bottom control hints, which are
+# intentionally hidden while a panel owns the input.
+# The 50-pixel strip is deliberately drawn across the top while a panel is up;
+# its large readout glyphs extend to about y=70, so geometry starts at y=75.
 DOCKED = {"fuel": (1056, 1281, "right"), "service": (640, 1281, "right"),
           "info": (897, 1281, "right"), "mytruck": (0, 415, "left")}
 bad = []
@@ -1056,7 +1079,7 @@ for name, (x0, x1, side) in DOCKED.items():
     px = read_bmp(ui[name][0])
     inside = rect_diff(BASE, px, x0, x1, 0, 720)
     outside = rect_diff(BASE, px, x1 if side == "left" else 0,
-                        x0 if side == "right" else 1280, 0, 720)
+                        x0 if side == "right" else 1280, 75, 680)
     if inside < 20.0 or outside > 0.5:
         bad.append(f"{name}: in {inside:.0f}% out {outside:.2f}%")
 check("docked panels cover their own rect and nothing else",
@@ -1068,32 +1091,30 @@ for name, (cx0, cy0, cx1, cy1) in {"popup5": (393, 280, 887, 440),
                                    "cbradio": (517, 142, 762, 577)}.items():
     px = read_bmp(ui[name][0])
     inside = rect_diff(BASE, px, cx0, cx1, cy0, cy1)
-    outside = (rect_diff(BASE, px, 0, cx0, 0, 720) +
-               rect_diff(BASE, px, cx1, 1280, 0, 720))
+    outside = (rect_diff(BASE, px, 0, cx0, 75, 680) +
+               rect_diff(BASE, px, cx1, 1280, 75, 680))
     if inside < 20.0 or outside > 0.5:
         bad.append(f"{name}: in {inside:.0f}% out {outside:.2f}%")
 check("centred popups are centred 1:1 and cover nothing else",
       not bad, "; ".join(bad) or "popup5 (393,280) + cbradio (517,142)")
 
-# The HUD strip is never wiped across its whole width, and an open panel never
-# mixes with the minimap: a left panel leaves it untouched, a right panel covers
-# it (the panel is drawn on top).
+# The original pause strip appears across the top, and an open panel never mixes
+# with the minimap: a left panel leaves it untouched, a right panel covers it
+# (the panel is drawn on top).
 bad = []
 for name, (x0, x1, dock) in {"fuel": (1056, 1281, "right"), "service": (640, 1281, "right"),
                              "info": (897, 1281, "right"), "mytruck": (0, 415, "left")}.items():
     px = read_bmp(ui[name][0])
-    sx0, sx1 = (x1, 1280) if dock == "right" else (0, x0)
-    strip = rect_diff(BASE, px, sx0, sx1, 2, 38)
+    pause = rect_diff(BASE, px, 0, 1280, 0, 50)
     mm = rect_diff(BASE, px, 1066, 1262, 460, 656)
-    lit = count(px[2], sx0, sx1, 2, 38, lambda c: sum(c) > 90)
-    if strip > 0.5 or lit < 0.5 * (sx1 - sx0) * 36:
-        bad.append(f"{name}: strip {strip:.2f}% lit {lit}")
+    if pause < 5.0:
+        bad.append(f"{name}: pause strip only {pause:.2f}% changed")
     if dock == "left" and mm > 0.5:
         bad.append(f"{name}: minimap {mm:.2f}%")
     if dock == "right" and mm < 50.0:
         bad.append(f"{name}: minimap not covered ({mm:.0f}%)")
-check("the strip stays intact beside a panel and the minimap never mixes with one",
-      not bad, "; ".join(bad) or "strip identical outside the panel, minimap untouched/covered")
+check("the pause strip is visible and the minimap never mixes with a panel",
+      not bad, "; ".join(bad) or "pause visible, minimap untouched/covered")
 
 # --- the panel actions the App binds (fuel -> refuel, service -> repair/tune,
 #     order -> accept, info -> deliver, sale -> buy) ------------------------
@@ -1111,6 +1132,7 @@ ACTS = [
     ("service", "servcanc", "resume"),
 ]
 bad = []
+handled = []
 for panel, btn, want in ACTS:
     out = run_env(UI_DEMO, *(UI_QUIET + ["--ui-panel", panel, "--ui-act", btn, "--screenshot",
                                        "--out", os.path.join(OUT, "ui_act.bmp"),
@@ -1119,8 +1141,14 @@ for panel, btn, want in ACTS:
                   % (btn, panel), out)
     if not m or m.group(1) != want:
         bad.append(f"{panel}/{btn}:{m.group(1) if m else 'none'}!={want}")
+    if f"unhandled action '{want}'" in out:
+        bad.append(f"{panel}/{btn}:{want} reached App but was not handled")
+    else:
+        handled.append(want)
 check("every panel action is declared and produced for the App",
       not bad, "; ".join(bad) or ", ".join(f"{p}/{b}->{a}" for p, b, a in ACTS[:5]) + " ...")
+check("every produced panel action is consumed by the App",
+      len(handled) == len(ACTS), f"{len(handled)}/{len(ACTS)} actions handled")
 
 # the service panel's tuning list is selectable and the СТАВИТЬ ВСЁ hot spot works
 out = run_env(UI_DEMO, *(UI_QUIET + ["--ui-panel", "service", "--ui-act", "mdown,mdown,mrun",
@@ -1128,12 +1156,14 @@ out = run_env(UI_DEMO, *(UI_QUIET + ["--ui-panel", "service", "--ui-act", "mdown
                                        "--size", "1280x720"]))
 check("tuning: the list scrolls and APPLY produces 'tune'",
       "ui: selection 2/19 on 'service'" in out and "ui: selection 3/19 on 'service'" in out
-      and "-> action 'tune'" in out, "19 upgrade cells, 2 scroll steps")
+      and "-> action 'tune'" in out and "unhandled action 'tune'" not in out,
+      "19 upgrade cells, 2 scroll steps, App handler reached")
 out = run_env(UI_DEMO, *(UI_QUIET + ["--ui-panel", "service", "--ui-act", "tuneall",
                                        "--screenshot", "--out", os.path.join(OUT, "ui_act_all.bmp"),
                                        "--size", "1280x720"]))
 check("tuning: the painted 'СТАВИТЬ ВСЁ' row is a hot spot",
-      "esc: activate 'tuneall'" in out and "-> action 'tuneall'" in out, "install-all")
+      "esc: activate 'tuneall'" in out and "-> action 'tuneall'" in out
+      and "unhandled action 'tuneall'" not in out, "install-all handled by App")
 
 # the purchase list shows the market, scrolls and keeps its detail rows in sync
 out = run_env(UI_DEMO, *(UI_QUIET + ["--ui-panel", "sale", "--ui-act", "mdown", "--screenshot",
@@ -1265,7 +1295,7 @@ BEND = ("--scene", "world", "--screenshot", "--spawn", "-2886,-4643,70",
 full = os.path.join(OUT, "road_full.bmp")
 nog = os.path.join(OUT, "road_noground.bmp")
 old = os.path.join(OUT, "road_oldterrain.bmp")
-run(*BEND, "--out", full)
+road_out = run(*BEND, "--out", full)
 run(*BEND, "--out", nog, "--no-ground")
 run(*BEND, "--out", old, "--terrain")
 bad, tot = road_cover(full, nog)
@@ -1273,9 +1303,132 @@ bad_old, tot_old = road_cover(old, nog)
 check("road continuity: asphalt not buried by the terrain at a bend",
       tot > 20000 and bad < tot * 0.001,
       f"{bad}/{tot} asphalt px covered ({100.0 * bad / max(1, tot):.2f}%)")
+check("authored B3D roads are not duplicated by procedural ribbons",
+      "road mesh:" not in road_out, "terrain-only generated mesh")
 check("road continuity: the pre-fix mesh (--terrain) still breaks it (control)",
       bad_old > bad * 5,
       f"old {bad_old} px vs new {bad} px")
+
+# ----------------------------------------------------- cars on the road surface
+# The wheel-height metric: --traffic-wheel-probe runs the real AI at 10/25/40/64
+# cars and compares each car's four wheel contact points (from the body capsule
+# Traffic uses) with the authored asphalt directly under them (a downward ray
+# cast into the B3D triangles, no rasterisation).  "Flying / sinking" is exactly
+# this number; it must stay inside a few centimetres, and no sample may have the
+# asphalt missing entirely under the wheel column (a car standing on the terrain
+# mesh instead of a road).
+print("AI cars stand on the asphalt (--traffic-wheel-probe)")
+rep = run("--scene", "world", "--traffic-wheel-probe", "8")
+m = re.search(r"traffic-wheel-probe: RESULT samples=(\d+) noasphalt=(\d+) mean=(-?[\d.]+) "
+              r"median=(-?[\d.]+) p95=([\d.]+) max=([\d.]+) over5=(\d+) over20=(\d+) "
+              r"junction=(\d+)", rep)
+check("traffic wheel probe runs the simulated AI at several densities", bool(m),
+      m.group(0)[:80] if m else "no RESULT line")
+if m:
+    tw_samples, tw_no, tw_mean, tw_p95, tw_max = (int(m.group(1)), int(m.group(2)),
+                                                  float(m.group(3)), float(m.group(5)),
+                                                  float(m.group(6)))
+    tw_over5, tw_over20, tw_junction = int(m.group(7)), int(m.group(8)), int(m.group(9))
+    check("no AI car is more than a few centimetres off the asphalt under its wheels",
+          tw_samples > 20000 and tw_max < 2.0 and tw_over5 == 0 and tw_over20 == 0,
+          f"{tw_samples} wheel samples, max {tw_max:.3f} m, p95 {tw_p95:.3f} m, "
+          f"mean {tw_mean:+.3f} m, >5 m {tw_over5}")
+    check("a junction does not lift or drop the cars (worst case is away from one)",
+          tw_junction > 1000 and tw_over20 == 0,
+          f"{tw_junction} junction wheel samples, >20 m {tw_over20}")
+
+# The player's truck rides on the ground map, which is a *terrain* field: under
+# an asphalt carriageway it sits several metres below the road, so a truck that
+# followed it sank through the surface.  Vehicle follows the road profile now.
+out = run("--scene", "world", "--drive", "12", "--spawn", "-3020,-4625,0",
+          "--traffic", "0", "--no-collision")
+if "playerwheel_samples" not in out:                    # (regex sanity, not a check)
+    print("   note: no player wheel line in the drive output")
+m = re.search(r"drive: RESULT playerwheel_samples=(\d+) noasphalt=(\d+) "
+              r"mean=([-+]?[\d.]+) p95=([\d.]+) max=([\d.]+).*maxstep=([\d.]+)", out)
+check("the player's wheels stand on the road surface (not on the terrain below it)",
+      bool(m) and int(m.group(1)) > 1000 and float(m.group(5)) < 0.05 and float(m.group(6)) < 0.5,
+      f"{m.group(1)} samples, max {m.group(5)} m, p95 {m.group(4)} m, "
+      f"per-frame step {m.group(6)} m" if m else "no RESULT line")
+# (the RESULT prints a forced sign, e.g. mean=+0.000, since the onroad_* fields)
+
+# ------------------------------------------------------ the road does not shake
+# tools/road_fight.py measures the *geometry* half of "дороги дрожат": the
+# asphalt mask comes from `--only-mat mat_road` vs a material that matches
+# nothing, and a pixel "fights" when the full frame draws asphalt at one camera
+# pose and something else (the generated ground mesh, another tile triangle) a
+# fraction of a degree later.  A same-pose pair must be byte-identical, and the
+# ground overlap must stay 0: the ground sheet is never the surface over asphalt.
+print("road geometry does not fight the terrain")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import road_fight
+fights = []
+for cam, spawn in (("-1740.5,31,3960,80.5,-14", "-2886,-4643,70"),
+                   ("-2250.5,48,3700,0,-14", "-2886,-4643,70")):
+    r = road_fight.measure(shots=OUT, tag="fight" + str(len(fights)), camera=cam,
+                           spawn=spawn, delta=0.03, verbose=False)
+    fights.append(r)
+    # The residual is the asphalt *silhouette* moving 0.4 px with the camera
+    # (measured: the same residual with the ground switched off), so the bound is
+    # a small fraction of the road, not zero.
+    check("no asphalt pixel alternates material across a sub-degree camera move",
+          r["control"] == 0 and r["flip_pct"] < 0.15,
+          f"{cam.split(',')[0]},{cam.split(',')[2]}: {r['flip']} flipping px of "
+          f"{r['mask']} ({r['flip_pct']:.3f}%), control {r['control']}")
+    check("the generated ground never covers a road pixel (no z-fight)",
+          r["ground_over"] == 0,
+          f"{r['ground_over']} asphalt px overlapped by the ground mesh "
+          f"(ground paints {r['ground_px']} px)")
+
+# The geometric separation under the asphalt: --road-probe measures the gap
+# between the authored road and the generated ground mesh with the mesh's own
+# height evaluation.  It has to stay clear of depth-buffer resolution (a few
+# centimetres would z-fight) without burying the road (the check above).
+rep = run("--scene", "world", "--road-probe")
+m = re.search(r"road-probe: RESULT samples=(\d+) skipped=(\d+) asphalt4=(\d+) "
+              r"noasphalt=(\d+) maxerr=([\d.]+).*gapmin=(-?[\d.]+) gapmedian=([\d.]+) "
+              r"gapsmall=(\d+) above=(\d+)", rep)
+check("road/ground clearance: the ground mesh stays well below the asphalt everywhere",
+      bool(m) and float(m.group(6)) > 1.0 and int(m.group(9)) == 0,
+      f"min gap {m.group(6)} m, median {m.group(7)} m, gaps<0.5 m {m.group(8)}, "
+      f"ground above asphalt {m.group(9)}" if m else "no RESULT line")
+
+# The drivable surface has three layers now (src/world/RoadSurface.{h,cpp}): the
+# `.way` profile on the network, the tiles' own asphalt geometry just off it
+# (where the network ends - the aa warehouse - and over unmapped aprons), and the
+# terrain field beyond.  `--road-probe` walks every carriageway triangle the tiles
+# contain and asks the layered surface at three points of it with the triangle's
+# own height as the reference: those are exactly the points the `.way`-only
+# profile could not serve.
+m = re.search(r"road-probe: C off-network tile asphalt: (\d+) points, (\d+) answered by the "
+              r"tile layer, (\d+) with the wrong surface, (\d+) >5 cm off; \|error\| median "
+              r"([-+]?[\d.]+) m, p95 ([-+]?[\d.]+) m, MAX ([-+]?[\d.]+) m", rep)
+check("off-network carriageway is served by the tiles' own asphalt",
+      bool(m) and int(m.group(1)) > 1000 and int(m.group(2)) >= int(m.group(1)) * 99 // 100
+      and int(m.group(3)) < int(m.group(1)) // 500,
+      f"{m.group(2)}/{m.group(1)} off-network tile points answered by the tile layer "
+      f"({m.group(3)} wrong surface, {m.group(4)} >5 cm)" if m else "no off-network line")
+if m:
+    check("the tile layer reproduces the tile asphalt (median error 0.00 m, p95 <= 0.5 m)",
+          abs(float(m.group(5))) < 0.05 and float(m.group(6)) <= 0.5,
+          f"median {m.group(5)} m, p95 {m.group(6)} m, max {m.group(7)} m")
+
+# The layer breakdown of the running simulation: the AI cars must stay on the
+# authored `.way` profile (the layer that agrees with the graph they are drawn at)
+# and must never be answered by the terrain field, which is the cut below the road.
+rep2 = run("--scene", "world", "--traffic-wheel-probe", "8")
+m = re.search(r"traffic-wheel-probe: player route \(2 starts\): \d+ frames, layers terrain "
+              r"\d+, \.way \d+, tile asphalt \d+, (\d+) m driven", rep2)
+check("the truck drives off the road network without being blocked (the apron hand-over)",
+      bool(m) and int(m.group(1)) >= 25,
+      f"{m.group(1) if m else '?'} m driven off-network; the ramp must not present a wall "
+      f"the climb check refuses")
+m2 = re.search(r"traffic-wheel-probe: surface layers under the wheels: terrain (\d+), "
+               r".way (\d+), tile asphalt (\d+)", rep2)
+check("the AI cars ride the .way profile, not the tile/terrain layers",
+      bool(m2) and int(m2.group(1)) == 0 and int(m2.group(2)) > int(m2.group(3)) * 10,
+      f"terrain {m2.group(1)}, .way {m2.group(2)}, tile {m2.group(3)}" if m2
+      else "no layer line")
 
 # --------------------------------------------------------------- draw distance
 print("draw distance (--view-distance)")

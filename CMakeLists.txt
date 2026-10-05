@@ -43,7 +43,9 @@ add_executable(ht2re
     src/world/Way.cpp
     src/world/B3D.cpp
     src/world/SceneTextures.cpp
+    src/world/Overlay.cpp
     src/world/GroundMap.cpp
+    src/world/RoadSurface.cpp
     src/world/Weather.cpp
     src/ui/Map.cpp
 )
@@ -72,4 +74,55 @@ target_link_libraries(ht2re PRIVATE
 if(UNIX AND NOT APPLE)
     find_package(Threads REQUIRED)
     target_link_libraries(ht2re PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+endif()
+
+# ---------------------------------------------------------------------------
+# ht2editor - the separate map + car-model editor (docs/editor.md).
+#
+# It is its own executable and is NOT part of ht2re.  It compiles the very same
+# renderer/.way/.b3d/.res/overlay sources the game uses (never a second parser)
+# and links them, so the game target above is left completely untouched.
+# ---------------------------------------------------------------------------
+set(HT2EDITOR_SHARED
+    src/gfx/Renderer.cpp
+    src/res/Res.cpp
+    src/res/Mask.cpp
+    src/ui/Font.cpp
+    src/world/B3D.cpp
+    src/world/Way.cpp
+    src/world/Overlay.cpp
+    src/world/SceneTextures.cpp
+    src/world/Terrain.cpp
+    src/world/GroundMap.cpp
+)
+# GroundMap -> RoadSurface; optional so the editor target also builds on a tree
+# where that file has not landed yet.
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/world/RoadSurface.cpp)
+    list(APPEND HT2EDITOR_SHARED src/world/RoadSurface.cpp)
+endif()
+
+add_executable(ht2editor
+    tools/editor/main.cpp
+    tools/editor/EditorApp.cpp
+    tools/editor/MapEditor.cpp
+    tools/editor/ModelEditor.cpp
+    ${HT2EDITOR_SHARED}
+)
+
+target_include_directories(ht2editor PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/editor
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${SDL2_INCLUDE_DIRS}
+    ${OPENGL_INCLUDE_DIR}
+)
+
+target_link_directories(ht2editor PRIVATE ${SDL2_LIBRARY_DIRS})
+
+target_link_libraries(ht2editor PRIVATE
+    ${SDL2_LIBRARIES}
+    ${OPENGL_LIBRARIES}
+)
+
+if(UNIX AND NOT APPLE)
+    target_link_libraries(ht2editor PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 endif()

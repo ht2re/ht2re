@@ -506,6 +506,113 @@ static constexpr float kGroundCell = 16.0f;
 static constexpr float kGroundMarginFlat = 1.0f;
 static constexpr float kGroundSkirt = 1600.0f;   // drawn beyond the tiles
 
+// The margin the generated ground keeps between the tile surface and itself, as
+// a function of `dist` = distance to the nearest covered tile cell (metres).
+//
+// `kGroundMarginFlat` (1 unit) is only what the 16-unit mesh grid needs next to
+// a *flat* road.  On a slope the road profile changes by |dy/dx| * 16 inside one
+// mesh cell, and the mesh's triangle chord would rise above the asphalt in the
+// middle of the cell - hence the slope-adaptive part, which is added per vertex
+// from the pass-1 gradient in buildFineGroundMesh() and is therefore *not* part
+// of this function.
+//
+// `kGroundClearance` is the second half of the road-shaking fix: inside 25 m of
+// the tiles the ground sheet keeps 2.5 extra units below the tile surface (over
+// the metre the interpolation bound needs), fading out over the next 75 m.  The
+// measured gap under asphalt goes from 1.0 m to 3.5 m (median 8.8 m, unchanged -
+// the terrain is only clamped where it was already close), which is at least 6
+// orders of magnitude coarser than the depth buffer can resolve at the draw
+// distance.  The depth-space half of the fix is the polygon offset on the ground
+// pass in draw().
+static constexpr float kGroundClearance = 2.5f;
+static constexpr float kGroundClearanceFade = 100.0f;
+static constexpr float kGroundClearanceNear = 25.0f;
+
+float Renderer::profileMargin(float dist) {
+    if (!(dist > 0.0f)) return kGroundMarginFlat + kGroundClearance;
+    if (dist >= kGroundClearanceFade) return kGroundMarginFlat;
+    float t = dist / kGroundClearanceFade;
+    t = t * t * (3.0f - 2.0f * t);                       // smoothstep
+    return kGroundMarginFlat + kGroundClearance * (1.0f - t);
+}
+
+// Pass 1 of the mesh: the raw heightmap clamped under the tile ceiling.
+static float groundProfile(const GroundMap* g, const Terrain* t, float x, float z) {
+    float y = t->heightAtWorld(x, z, 0.0f);
+    float near = 0.0f, dist = 0.0f;
+    if (g->ceilingAt(x, z, near, dist)) {
+        float s = dist / GroundMap::CEILING_FADE;
+        if (s > 1.0f) s = 1.0f;
+        s = s * s * (3.0f - 2.0f * s);                   // smoothstep
+        float limit = near + (y - near) * s;             // = the raw terrain at the fade end
+        float margin = Renderer::profileMargin(dist);
+        if (y > limit - margin) y = limit - margin;
+    }
+    return y;
+}
+
+bool Renderer::groundHeightAt(float x, float z, float& outY) const {
+    if (!terrain || !terrain->loaded() || !groundEnabled) return false;
+    if (useRawTerrain || !groundMap || groundMap->empty() || !groundMap->hasClearance()) {
+        // The raw 415-unit mesh, exactly as buildRawTerrainMesh() indexes it.
+        const float cell = terrain->sampleStep;
+        const float x0 = terrain->sampleX(0), z0 = terrain->sampleZ(Terrain::GRID - 1);
+        float fi = (x - x0) / cell, fj = (z - z0) / cell;
+        if (fi < 0.0f || fj < 0.0f) return false;
+        int i = (int)fi, j = (int)fj;
+        if (i + 1 >= Terrain::GRID || j + 1 >= Terrain::GRID) return false;
+        const float tx = fi - i, tz = fj - j;
+        auto at = [&](int a, int b) {
+            return terrain->worldY(terrain->h[(size_t)b * Terrain::GRID + a]);
+        };
+        float v00 = at(i, j), v10 = at(i + 1, j), v01 = at(i, j + 1), v11 = at(i + 1, j + 1);
+        // indices (a, c=a+G, b=a+1, d=c+1): (i,j), (i,j+1), (i+1,j), (i+1,j+1)
+        outY = (tx + tz <= 1.0f) ? v00 + (v10 - v00) * tx + (v01 - v00) * tz
+                                 : v11 + (v01 - v11) * (1.0f - tx) + (v10 - v11) * (1.0f - tz);
+        return true;
+    }
+    const float cell = kGroundCell;
+    const float x0 = groundMap->minX() - kGroundSkirt;
+    const float z0 = groundMap->minZ() - kGroundSkirt;
+    const int NX = (int)((groundMap->maxX() + kGroundSkirt - x0) / cell) + 1;
+    const int NZ = (int)((groundMap->maxZ() + kGroundSkirt - z0) / cell) + 1;
+    float fi = (x - x0) / cell, fj = (z - z0) / cell;
+    if (fi < 0.0f || fj < 0.0f) return false;
+    int i = (int)fi, j = (int)fj;
+    if (i + 1 >= NX || j + 1 >= NZ) return false;
+    const float tx = fi - i, tz = fj - j;
+    // Every interior vertex carries the slope-adaptive part of the margin, which
+    // needs the pass-1 gradient; the border ring does not (pass 2 only walks the
+    // interior of the mesh), so it has to be mirrored here.
+    auto vertY = [&](int a, int b) -> float {
+        float y = groundProfile(groundMap, terrain, x0 + a * cell, z0 + b * cell);
+        if (a == 0 || b == 0 || a == NX - 1 || b == NZ - 1) return y;
+        float gx = (groundProfile(groundMap, terrain, x0 + (a + 1) * cell, z0 + b * cell) -
+                    groundProfile(groundMap, terrain, x0 + (a - 1) * cell, z0 + b * cell)) / (2 * cell);
+        float gz = (groundProfile(groundMap, terrain, x0 + a * cell, z0 + (b + 1) * cell) -
+                    groundProfile(groundMap, terrain, x0 + a * cell, z0 + (b - 1) * cell)) / (2 * cell);
+        float sm = (std::fabs(gx) + std::fabs(gz)) * cell;
+        float cap = 4.0f * cell;
+        if (sm > cap) sm = cap;
+        float near = 0.0f, dist = 0.0f;
+        if (groundMap->ceilingAt(x0 + a * cell, z0 + b * cell, near, dist) && y > near - sm)
+            y = near - sm;
+        return y;
+    };
+    // Cell (i, j): idx = (a, b, a+NX) then (b, d, a+NX), i.e. the diagonal runs
+    // from (i+1, j) to (i, j+1); tx + tz <= 1 is the lower-left triangle.
+    float v00 = vertY(i, j), v10 = vertY(i + 1, j), v01 = vertY(i, j + 1), v11 = vertY(i + 1, j + 1);
+    outY = (tx + tz <= 1.0f) ? v00 + (v10 - v00) * tx + (v01 - v00) * tz
+                             : v11 + (v01 - v11) * (1.0f - tx) + (v10 - v11) * (1.0f - tz);
+    return true;
+}
+
+float Renderer::groundCellSize() const {
+    return (useRawTerrain || !groundMap || !groundMap->hasClearance())
+               ? (terrain ? terrain->sampleStep : kGroundCell)
+               : kGroundCell;
+}
+
 bool Renderer::buildTerrainMesh() {
     if (!groundEnabled) { LOG("ground: disabled"); triCount = 0; return true; }
     if (!terrain || !terrain->loaded()) return true;
@@ -538,16 +645,10 @@ bool Renderer::buildFineGroundMesh() {
             TVert v;
             v.x = x0 + i * cell;
             v.z = z0 + j * cell;
-            float y = terrain->heightAtWorld(v.x, v.z, 0.0f);
+            float y = groundProfile(g, terrain, v.x, v.z);
             float near = 0.0f, dist = 0.0f;
             bool have = g->ceilingAt(v.x, v.z, near, dist);
-            if (have) {
-                float t = dist / GroundMap::CEILING_FADE;
-                if (t > 1.0f) t = 1.0f;
-                t = t * t * (3.0f - 2.0f * t);            // smoothstep
-                float limit = near + (y - near) * t;      // = the raw terrain at the fade end
-                if (y > limit - kGroundMarginFlat) { y = limit - kGroundMarginFlat; ++clamped; }
-            }
+            if (have && y < terrain->heightAtWorld(v.x, v.z, 0.0f)) ++clamped;
             ceil[(size_t)j * NX + i] = have ? near : std::numeric_limits<float>::quiet_NaN();
             base.push_back(y);
             v.y = y;
@@ -586,8 +687,12 @@ bool Renderer::buildFineGroundMesh() {
             idx.push_back(a); idx.push_back(b); idx.push_back(c);
             idx.push_back(b); idx.push_back(d); idx.push_back(c);
         }
-    groundTris = (unsigned)idx.size() / 3;   // terrain part; road ribbons are appended
-    buildRoadMesh(verts, idx);
+    // The shipped ENV/*.b3d tiles already contain the complete textured road
+    // surface.  The old fallback ribbon duplicated it at heights sampled from
+    // the smoothed GroundMap; on dips and bends that ribbon rose through the
+    // authored asphalt and produced the torn/stacked road strips visible from
+    // the cockpit.  Keep the generated mesh strictly terrain-only.
+    groundTris = (unsigned)idx.size() / 3;
     upload3D(verts, idx, vao, vbo, ebo, triCount);
     if (getenv("HT2_GROUND_DEBUG")) {
         const float px[5] = {4700, 4750, -3020, -2327, -1740};
@@ -620,7 +725,10 @@ bool Renderer::buildRawTerrainMesh() {
 
     std::vector<float> tileMin((size_t)G * G, std::numeric_limits<float>::quiet_NaN());
     int clamped = 0;
-    if (groundMap && !groundMap->empty()) {
+    // --terrain is the *unclamped* pre-fix mesh (the control of the road
+    // continuity measurement): it must not consult the ground map at all, or a
+    // fix to the ground profile would silently repair the control as well.
+    if (!useRawTerrain && groundMap && !groundMap->empty()) {
         const int gw = groundMap->width(), gh = groundMap->height();
         const float gcell = groundMap->cellSize(), gx0 = groundMap->minX(), gz0 = groundMap->minZ();
         const std::vector<float>& cells = groundMap->cells();
@@ -690,8 +798,8 @@ bool Renderer::buildRawTerrainMesh() {
             idx.push_back(a); idx.push_back(c2); idx.push_back(b);
             idx.push_back(b); idx.push_back(c2); idx.push_back(d);
         }
-    groundTris = (unsigned)idx.size() / 3;   // terrain part; road ribbons are appended
-    buildRoadMesh(verts, idx);
+    // Roads come from the authored B3D tiles; see buildFineGroundMesh().
+    groundTris = (unsigned)idx.size() / 3;
     upload3D(verts, idx, vao, vbo, ebo, triCount);
     LOG("terrain mesh (raw heightmap, no ground map): %u tris, %d/%d samples clamped below "
         "the tile surface, x %.0f..%.0f z %.0f..%.0f",
@@ -1089,7 +1197,21 @@ void Renderer::draw(float cx, float cy, float cz, float yawDeg, float pitchDeg) 
         Range r; r.offset = 0; r.count = triCount; r.tex = 0;
         rs.push_back(r);
     }
+    // The generated ground is a *terrain* sheet that runs under the authored
+    // asphalt; the tiles are drawn afterwards (drawScene) and must always win the
+    // depth test where the two are near each other, at every distance and camera
+    // pitch.  A polygon offset on the ground pass (positive = away from the
+    // camera) is the depth-space half of that; the geometric half is the
+    // clearance groundProfile() keeps below the tile surface.
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(1.0f, 4.0f);
     drawRanges(vao, rs);
+    glDisable(GL_POLYGON_OFFSET_FILL);
+}
+
+void Renderer::clearDepth() {
+    glDepthMask(GL_TRUE);
+    glClear(GL_DEPTH_BUFFER_BIT);
 }
 
 void Renderer::drawScene(float cx, float cy, float cz, float yawDeg, float pitchDeg) {

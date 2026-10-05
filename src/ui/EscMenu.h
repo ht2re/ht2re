@@ -134,6 +134,7 @@ public:
         long refuelCost = -1;             // App's own pricing, -1 = unknown
         long repairCost = -1;
         long fuelPerLitre = -1;           // App's price per litre, -1 = unknown
+        std::string driverName;            // currently hired driver, empty = player
         std::string slotText;             // App::saveSummary()
         std::string notice;               // a transient message on the panel
         float noticeTimer = 0.0f;
@@ -165,13 +166,16 @@ public:
     // "order"/"acceptjob"/"deliverjob"), -1 when the panel is not open.
     int selectedOffer() const { return data_.saleIndex; }
     int selectedJob() const { return data_.orderIndex; }
+    const std::string& selectedHireName() const { return data_.hireName; }
     // The upgrade the service panel has highlighted ("" when none / other panel):
     // a GameData::upgrades key ("PR_FORCED_ENGINE") and its price.  The App
     // applies it (deduct the price, then tell the UI with markUpgradeBought()).
     const std::string& selectedUpgrade() const;
     long selectedUpgradePrice() const;
     void markUpgradeBought(const std::string& id);
+    void clearBoughtUpgrades() { bought_.clear(); }
     bool upgradeBought(const std::string& id) const;
+    const std::vector<std::string>& boughtUpgrades() const { return bought_; }
     // Every upgrade cell of the service panel as (GameData key, price) in the
     // painted order - the App's "СТАВИТЬ ВСЁ" (tuneall) handler sums these.
     std::vector<std::pair<std::string, long>> upgradeList() const;

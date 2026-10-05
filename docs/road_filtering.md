@@ -174,6 +174,28 @@ switches it to `GL_LINEAR`, because a mip chain built from *one* frame would be
 stale for the next one.  Those textures are only ever drawn as 1:1 2D screen
 quads (movie/test pattern), never in 3D, so they cannot shimmer.
 
+## 7b. The other half of "дорога дрожит": geometry, not sampling
+
+Anisotropic filtering fixes the *texture* shimmer; a road can also "shake" when
+two surfaces fight for the same pixels.  That half is measured (and ruled out) in
+`docs/terrain_road.md` §8 with `tools/road_fight.py`, which renders the same view
+twice 0.03 deg apart and asks, per asphalt pixel (mask from `--only-mat mat_road`
+against a material that matches nothing), whether the full frame stops drawing the
+authored road between the two poses:
+
+* two identical renders differ in **0 px** (control);
+* the ground mesh covers **0** asphalt pixels at every probed camera (6 of 353,314
+  at the worst grazing pose);
+* the residual `flip` is the asphalt *silhouette* crossing a pixel (6 of 60,988 at
+  the `ba` highway, 552 of 557,097 at the apron) and is **identical with the
+  ground switched off**, i.e. it is not the ground.
+
+The geometric gap under the asphalt (measured with the ground mesh's own height
+evaluation, `--road-probe`) is 3.5 m at its tightest and 8.05 m at the median,
+against a 24-bit depth buffer that resolves ~0.03 m at 400 m, so the two surfaces
+are separated by three orders of magnitude more than depth precision.  A
+`glPolygonOffset(1.0, 4.0)` on the ground pass makes the tiles win any tie.
+
 ## 8. Reproduce
 
 ```sh

@@ -927,6 +927,7 @@ void EscMenu::refresh() {
             d.hireTariff = d.orderReward;
         }
     }
+    if (!c.driverName.empty()) d.driver = c.driverName;
     if (c.way && (c.vehicle || demo)) {
         // the nearest *named* node of the road network (the "road" row)
         float best = 1.0e18f;
@@ -1469,6 +1470,7 @@ std::string EscMenu::hotkey(int key) const {
         case SDLK_F1: return "f1";
         case SDLK_F2: return "f2";
         case SDLK_F3: return "f3";
+        case SDLK_F4: return "mytruck";
         case SDLK_F5: return "cbradio";
         default:      return "";
     }

@@ -17,12 +17,10 @@ Everything is read from the original encrypted data:
 Usage:  python3 tools/economy_check.py [--data original] [-v]
 Exit code 0 when every job resolved and the catalogue is non-empty.
 
-Two details this file has to reproduce from src/script/Sexp.cpp, which
-tools/sexp.py on its own does not handle:
-  * `\\` escapes a quote ("Телевизор 14\\"" would otherwise swallow the next
-    cargo item, giving 106 instead of 107)
-  * merchandise.sch writes C_WAGES' sell price as `1#e+006` (1,000,000); `#`
-    stands for the exponent marker `e`.
+The reader is tools/sexp.py, which now handles both quirks this file used to
+work around (escapes inside strings, and `()` not being an atom).  One data
+defect stays explicit: merchandise.sch writes C_WAGES' sell price as
+`1#e+006`; `#` is the exponent marker, so the value is 1000000.
 """
 from __future__ import annotations
 
@@ -50,41 +48,6 @@ UNLOAD_ROLE = "unload"   # town node role of the warehouse
 
 
 # ---- readers -----------------------------------------------------------------
-def _tokenize_escapes(text):
-    """tools/sexp.py stops at the first `"`; src/script/Sexp.cpp honours `\\`."""
-    toks = []
-    i, n = 0, len(text)
-    while i < n:
-        c = text[i]
-        if c in ' \t\r\n':
-            i += 1
-        elif c == ';':
-            while i < n and text[i] not in '\r\n':
-                i += 1
-        elif c in '()':
-            toks.append(c)
-            i += 1
-        elif c == '"':
-            j, v = i + 1, []
-            while j < n and text[j] != '"':
-                if text[j] == '\\' and j + 1 < n:
-                    j += 1
-                v.append(text[j])
-                j += 1
-            toks.append('"' + ''.join(v) + '"')
-            i = j + 1
-        else:
-            j = i
-            while j < n and text[j] not in ' \t\r\n()':
-                j += 1
-            toks.append(text[i:j])
-            i = j
-    return toks
-
-
-sexp._tokenize = _tokenize_escapes
-
-
 def parse_script(path):
     raw = open(path, 'rb').read()
     if raw[:4] == b'SDTE':
@@ -93,7 +56,7 @@ def parse_script(path):
 
 
 def num(node, i, default=0):
-    """Lenient number: `#` is the exponent marker (C_WAGES `1#e+006`)."""
+    """Lenient number: `#` terminates the mantissa (C_WAGES `1#e+006` -> 1e6)."""
     if node is None or i < 0 or i >= len(node):
         return default
     k = node[i]

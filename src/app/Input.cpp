@@ -449,7 +449,7 @@ Input::State Input::computeState(const RawPad& raw, float dt) {
     const bool padMap = held(PAD_BACK);
 
     const bool eView = view_.update(padView);
-    const bool eKbView = kbView_.update(key(SDL_SCANCODE_C));
+    const bool eKbView = kbView_.update(key(SDL_SCANCODE_C) || key(SDL_SCANCODE_V));
     const bool eBuy = buy_.update(padBuy);
     const bool eKbBuy = kbBuy_.update(key(SDL_SCANCODE_B));
     const bool eJob = job_.update(padJob);

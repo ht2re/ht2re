@@ -336,6 +336,88 @@ int main(int argc, char** argv) {
               std::to_string(withMsgs) + " message pairs");
     }
 
+    // ---- the second-pass constants (docs/script_gameplay.md 14) ----------
+    {
+        check(ScriptRules::kObstaclePlayerAway == 500.0 &&
+              ScriptRules::kObstaclePlayerAway == ScriptRules::kObstacleMinSeparation,
+              "the obstacle player-distance constant is the engine's 500 u "
+              "(0x42b33a `fcomp qword [0x64b860]`)",
+              std::to_string((int)ScriptRules::kObstaclePlayerAway) + " u");
+        // king.exe 0x5a9d40: clearness 1 -> badness 0, clearness 0 -> badness 1
+        const double clear = scriptBadness(1.0, 0.0, 0.0, 0.0);
+        const double storm = scriptBadness(0.0, 0.0, 0.0, 0.0);
+        const double mid = scriptBadness(0.5, 0.0, 0.0, 0.0);
+        const double wrap = scriptBadness(0.5, 0.0, 0.0, 3.14159265358979);
+        check(clear == 0.0 && storm == 1.0 && mid == 0.0 && wrap == 1.0,
+              "the weather-badness curve 0x5a9d40 is reproduced "
+              "(b = 0.5*(1+A+B*(1-|A|)*sin(phase-pi/2+t)))",
+              std::to_string(clear) + "/" + std::to_string(storm) + "/" +
+              std::to_string(mid) + "/" + std::to_string(wrap));
+        // the curve must cross the 0.2 "good weather" threshold exactly twice
+        // per period, i.e. the engine's good/bad window is a sinusoid
+        int good = 0, bad = 0;
+        for (int i = 0; i < 64; ++i) {
+            double b = scriptBadness(0.8, 0.0, 0.0, i * 0.1);
+            if (b < ScriptRules::kGoodWeatherMax) ++good; else ++bad;
+        }
+        check(good > 0 && bad > 0, "the curve crosses the 0.2 good-weather "
+              "threshold over a period", std::to_string(good) + "/" +
+              std::to_string(bad));
+    }
+
+    // ---- the engine's node pass is a road-position transition ------------
+    {
+        // a synthetic .way link: node A at (0,0), node B at (0,100), width 10
+        ScriptRoadSeg seg;
+        seg.nodeA = "A"; seg.nodeB = "B"; seg.width = 10.0;
+        seg.xz = {0.0, 0.0, 0.0, 50.0, 0.0, 100.0};
+        ScriptRuntime rt(gd);
+        rt.setRoadSegments({seg});
+        ScriptWorldState st;
+        st.time = 0.0;
+        st.hour = 12.0;
+        st.weather = 0.0f;
+        int fires = 0;
+        // roll from 0 to 100 m along the link, one frame per metre
+        for (int i = 0; i <= 100; ++i) {
+            st.px = 0.0; st.pz = (double)i;
+            st.time = i * 0.1;
+            rt.update(st);
+            fires += (int)rt.coverage().nodeEventsFired;
+        }
+        check(rt.haveRoadSegments() && rt.roadPasses() >= 1,
+              "the road-position rule fires the node event at the link end",
+              std::to_string(rt.roadPasses()) + " passes, " +
+              std::to_string(fires) + " events");
+        check(rt.currentRoadNode() == "B",
+              "the player is on node B at the far end of the link",
+              rt.currentRoadNode());
+        // 60 m off the link is off-road: no road position, no pass
+        ScriptRuntime rt2(gd);
+        rt2.setRoadSegments({seg});
+        for (int i = 0; i <= 20; ++i) {
+            st.px = 60.0; st.pz = (double)i * 5.0; st.time = i * 0.1;
+            rt2.update(st);
+        }
+        check(rt2.roadPasses() == 0 && rt2.currentRoadNode().empty(),
+              "60 m aside is off-road and passes nothing",
+              std::to_string(rt2.roadPasses()));
+        // driving the link backwards passes B first and ends on A
+        ScriptRuntime rt3(gd);
+        rt3.setRoadSegments({seg});
+        std::string firstPass;
+        for (int i = 100; i >= 0; --i) {
+            st.px = 0.0; st.pz = (double)i; st.time = (100 - i) * 0.1;
+            size_t before = rt3.roadPasses();
+            rt3.update(st);
+            if (firstPass.empty() && rt3.roadPasses() > before) firstPass = rt3.currentRoadNode();
+        }
+        check(firstPass == "B" && rt3.currentRoadNode() == "A",
+              "the rule is direction-agnostic in geometry (B first when driving "
+              "the link backwards, A at the end)",
+              firstPass + " -> " + rt3.currentRoadNode());
+    }
+
     printf("\n%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

@@ -13,6 +13,10 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <limits>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace ht2 {
 
@@ -22,6 +26,15 @@ static float modelGroundOffset(const std::vector<B3D::SubMesh>& subs);
 static void dropDamagedParts(std::vector<B3D::SubMesh>& subs);
 
 static const float PI = 3.14159265358979f;
+
+// "…/ENV/aa.way" -> "aa": the tile name the overlay records are keyed by
+// (src/world/Overlay.h, docs/editor.md).
+static std::string wayTileStem(const std::string& path) {
+    size_t slash = path.find_last_of("/\\");
+    std::string base = slash == std::string::npos ? path : path.substr(slash + 1);
+    size_t dot = base.find_last_of('.');
+    return dot == std::string::npos ? base : base.substr(0, dot);
+}
 
 int App::run(const Options& o) {
     opt_ = o;
@@ -38,7 +51,8 @@ int App::run(const Options& o) {
     // --audio/--menu-music asks for it, so nothing headless ever needs a working
     // sound device.
     const bool headless = opt_.screenshot || !opt_.escShot.empty() || opt_.drive > 0.0f ||
-                          opt_.trafficReport > 0.0f;
+                          opt_.trafficReport > 0.0f || opt_.roadProbe ||
+                          opt_.trafficWheelProbe > 0.0f || opt_.rideProbe;
     audioWanted_ = !opt_.noAudio && (!headless || opt_.forceAudio || opt_.menuMusic);
     videoAudioWanted_ = audioWanted_;
     if (!loadData()) return 2;
@@ -62,11 +76,16 @@ int App::run(const Options& o) {
     if (state_ == State::World) {
         // the drivable truck lives in COMMON/TRUCKS.B3D, assembled via its links
         haveTrucks_ = trucks_.load(opt_.dataDir + "/COMMON/TRUCKS.B3D");
+        // --overlay: editor anchor edits are part of the model, so they must be
+        // in place before the named scene places its linked part containers.
+        if (haveTrucks_) overlay_.applyAnchors(trucks_, opt_.vehicle);
         if (haveTrucks_ && !trucks_.buildNamedScene(opt_.vehicle))
             LOG("app: vehicle '%s' not found in TRUCKS.B3D", opt_.vehicle.c_str());
         // The container carries the dented skin as well; the player's truck is
         // drawn intact (its progressive damage skin is not wired to the model).
         if (haveTrucks_) dropDamagedParts(trucks_.submeshesMutable());
+        // --overlay: part visibility + material swaps, after the assembly.
+        if (haveTrucks_) overlay_.applyParts(trucks_.submeshesMutable(), opt_.vehicle);
     }
     if (!r_.init(opt_.w, opt_.h, opt_.screenshot, opt_.fullscreen)) return 3;
     input_.init(opt_.dataDir);
@@ -119,9 +138,10 @@ int App::run(const Options& o) {
         }
         indexWayNodes();
         buildMinimapTexture();
-        prepareNodeEvents();
         vehicle3d_.setGround(&ground_);
+        vehicle3d_.setRoads(&ground_);   // drive on the road profile, not the terrain
         vehicle3d_.reset(spawn_[0], spawn_[1], spawn_[2]);
+        prepareNodeEvents();
         if (opt_.startFuel >= 0.0f) vehicle3d_.setFuel(opt_.startFuel);
         if (opt_.startDamage > 0.0f) vehicle3d_.addDamage(opt_.startDamage);
         if (opt_.traffic > 0) spawnTraffic();
@@ -159,16 +179,29 @@ int App::run(const Options& o) {
     // device while it plays); entering the world stops it again.
     if (state_ == State::Menu) startMenuMusic();
 
-    // --menu-act ID: the same path a click/keyboard activation takes, for tests
-    // (e.g. `--menu-act recor` plays the movie the ВИДЕОПЛЕЕР button plays).
+    // --menu-act ID[,back]: the same path a click/keyboard activation takes,
+    // for deterministic menu-flow tests.  "back" is an Escape press.
     if (state_ == State::Menu && !opt_.menuAct.empty()) {
-        LOG("menu: activate '%s' (--menu-act)", opt_.menuAct.c_str());
-        if (audio_.ready()) audio_.playGlobal("pager", 0.6f);
-        if (opt_.menuAct == "singl") enterWorld();
-        else if (opt_.menuAct == "recor") {
-            if (!enterMovie(opt_.movieName))
+        size_t pos = 0;
+        while (pos <= opt_.menuAct.size() && state_ == State::Menu) {
+            const size_t comma = opt_.menuAct.find(',', pos);
+            const std::string tok = opt_.menuAct.substr(
+                pos, comma == std::string::npos ? std::string::npos : comma - pos);
+            pos = comma == std::string::npos ? opt_.menuAct.size() + 1 : comma + 1;
+            if (tok == "back") {
+                LOG("menu: back (--menu-act)");
+                menu_.handleKey(SDLK_ESCAPE);
+                continue;
+            }
+            LOG("menu: activate '%s' (--menu-act)", tok.c_str());
+            if (audio_.ready()) audio_.playGlobal("pager", 0.6f);
+            if (!menu_.activateName(tok))
+                menu_.setMessage("НЕИЗВЕСТНАЯ КНОПКА", 2.5f);
+            const std::string direct = menu_.takeActivated();
+            if (direct == "singl") enterWorld();
+            else if ((direct == "recor" || direct == "demo") && !enterMovie(opt_.movieName))
                 menu_.setMessage("ФИЛЬМ НЕДОСТУПЕН (tools/make_video.sh)", 3.0f);
-        } else menu_.setMessage("НЕ РЕАЛИЗОВАНО", 2.5f);
+        }
     }
 
     // --esc* implies the world (like --autostart, it runs the real transition);
@@ -183,7 +216,14 @@ int App::run(const Options& o) {
         Vehicle::Input wi;
         wi.throttle = 1.0f;
         const float step = 1.0f / 60.0f;
-        for (int i = 0; i < (int)(opt_.warmup / step); ++i) vehicle3d_.update(wi, step);
+        for (int i = 0; i < (int)(opt_.warmup / step); ++i) {
+            vehicle3d_.update(wi, step);
+            updateClock(step);
+            updateNodeEvents(step);
+            updateGates();
+            updateAmbushes();
+            economy_.tick(step);
+        }
         LOG("app: warmup %.1fs -> pos (%.0f, %.0f) speed %.1f km/h",
             opt_.warmup, vehicle3d_.x(), vehicle3d_.z(), vehicle3d_.speedKmh());
         if (opt_.camGiven) {
@@ -196,9 +236,10 @@ int App::run(const Options& o) {
 
     // --- in-game ESC screens (src/ui/EscMenu.cpp, docs/esc_impl.md) ---------
     // The panel art is decoded here because Renderer::init() has already run.
+    esc_.load(opt_.dataDir);
+    esc_.loadArt(r_);
     if (escWanted) {
-        esc_.load(opt_.dataDir);
-        esc_.loadArt(r_);
+        syncEscContext();
         if (audio_.ready()) {          // seed the ЗВУК sliders from TRUCK.INI
             esc_.setSliderValue("voll", audio_.masterVolume());
             esc_.setSliderValue("musl", audio_.musicVolume());
@@ -211,6 +252,15 @@ int App::run(const Options& o) {
         if (!opt_.escShot.empty()) { opt_.out = opt_.escShot; opt_.screenshot = true; }
     }
 
+    if (!opt_.uiKey.empty()) {
+        int key = opt_.uiKey == "Esc" ? SDLK_ESCAPE : SDL_GetKeyFromName(opt_.uiKey.c_str());
+        if (state_ != State::World || !handleWorldPanelKey(key)) {
+            LOG("ui: invalid world key '%s'", opt_.uiKey.c_str());
+            finish();
+            r_.shutdown();
+            return 4;
+        }
+    }
     if (opt_.drive > 0.0f) {
         int rc = driveTest();
         finish();
@@ -219,6 +269,24 @@ int App::run(const Options& o) {
     }
     if (opt_.trafficReport > 0.0f) {
         int rc = trafficReport();
+        finish();
+        r_.shutdown();
+        return rc;
+    }
+    if (opt_.rideProbe) {
+        int rc = rideProbeReport();
+        finish();
+        r_.shutdown();
+        return rc;
+    }
+    if (opt_.roadProbe) {
+        int rc = roadProbeReport();
+        finish();
+        r_.shutdown();
+        return rc;
+    }
+    if (opt_.trafficWheelProbe > 0.0f) {
+        int rc = trafficWheelProbe();
         finish();
         r_.shutdown();
         return rc;
@@ -276,6 +344,24 @@ int App::run(const Options& o) {
             // --- in-game ESC screens own the input while they are up ---------
             // (the keyboard/gamepad navigation goes through the SDL events, so
             // the Input module's one-shot edges stay untouched)
+            // --- front-end menu: the pad drives it too (Menu::handlePad) -----
+            else if (e.type == SDL_CONTROLLERBUTTONDOWN && state_ == State::Menu &&
+                     !esc_.active()) {
+                Menu::PadButton b = Menu::PadA;
+                bool known = true;
+                switch (e.cbutton.button) {
+                    case SDL_CONTROLLER_BUTTON_DPAD_UP:    b = Menu::PadUp; break;
+                    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  b = Menu::PadDown; break;
+                    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  b = Menu::PadLeft; break;
+                    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: b = Menu::PadRight; break;
+                    case SDL_CONTROLLER_BUTTON_B:
+                    case SDL_CONTROLLER_BUTTON_BACK:       b = Menu::PadB; break;
+                    case SDL_CONTROLLER_BUTTON_START:      b = Menu::PadStart; break;
+                    case SDL_CONTROLLER_BUTTON_A:          b = Menu::PadA; break;
+                    default:                               known = false; break;
+                }
+                if (known) menu_.handlePad(b);
+            }
             else if (e.type == SDL_CONTROLLERBUTTONDOWN && esc_.active()) {
                 escSwallowMenu_ = true;   // pad START also raises Input::State::menu
                 switch (e.cbutton.button) {
@@ -300,8 +386,17 @@ int App::run(const Options& o) {
                     else esc_.handleKey(e.key.keysym.sym);
                 } else if (e.key.keysym.sym == SDLK_ESCAPE) {
                     // in the world the menu edge comes from Input (Esc is mapped
-                    // there); at the menu Esc quits the game
-                    if (state_ != State::World) running = false;
+                    // there).  A front-end sub-page owns Escape and returns to
+                    // the main frame; only Escape on the main frame quits.
+                    if (state_ == State::Menu &&
+                        (!menu_.page().empty() || menu_.confirmOpen()))
+                        menu_.handleKey(SDLK_ESCAPE);
+                    else if (state_ == State::World && !e.key.repeat) {
+                        handleWorldPanelKey(SDLK_ESCAPE);
+                        escSwallowMenu_ = true;
+                    } else if (state_ != State::World) running = false;
+                } else if (state_ == State::World) {
+                    if (!e.key.repeat) handleWorldPanelKey(e.key.keysym.sym);
                 } else if (state_ == State::Menu) {
                     menu_.handleKey(e.key.keysym.sym);
                 }
@@ -309,6 +404,8 @@ int App::run(const Options& o) {
                 prevMx = e.motion.x; prevMy = e.motion.y;
                 if (esc_.active())
                     esc_.handleMouse((float)prevMx, (float)prevMy, false, r_.width_, r_.height_);
+                else if (state_ == State::Menu)
+                    menu_.handleMouse((float)prevMx, (float)prevMy, false);
             } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
                 prevMx = e.button.x; prevMy = e.button.y;
                 if (state_ == State::Movie) {               // any button skips too
@@ -363,9 +460,12 @@ int App::run(const Options& o) {
                 if (audio_.ready()) audio_.playGlobal("pager", 0.6f);   // UI blip
                 if (act == "exit") { running = false; }
                 else if (act == "singl") { enterWorld(); }
-                else if (act == "recor") {          // ВИДЕОПЛЕЕР
+                else if (act == "recor" || act == "demo") { // replay/demo selection
                     if (!enterMovie(opt_.movieName))
                         menu_.setMessage("ФИЛЬМ НЕДОСТУПЕН (tools/make_video.sh)", 3.0f);
+                }
+                else if (act == "multi") {
+                    menu_.setMessage("СЕТЕВОЙ ТРАНСПОРТ НЕДОСТУПЕН", 3.0f);
                 }
                 else {
                     menu_.setMessage("НЕ РЕАЛИЗОВАНО", 2.5f);
@@ -584,15 +684,47 @@ void App::pickGroundTexture() {
 
 // Every ENV tile has its own .way road graph; the mod_*.sch scripts reference the
 // named nodes across all of them, so the whole set is indexed once.
+void App::collectWaySegments() {
+    if (!waySegs_.empty()) return;
+    std::vector<std::string> files;
+    if (!opt_.onlyTile.empty()) {
+        files.push_back(opt_.dataDir + "/ENV/" + opt_.onlyTile + ".way");
+    } else {
+        DIR* d = opendir((opt_.dataDir + "/ENV").c_str());
+        if (!d) return;
+        while (struct dirent* e = readdir(d)) {
+            std::string n = e->d_name;
+            if (n.size() > 4 && n.compare(n.size() - 4, 4, ".way") == 0)
+                files.push_back(opt_.dataDir + "/ENV/" + n);
+        }
+        closedir(d);
+        std::sort(files.begin(), files.end());
+    }
+    size_t nFiles = 0;
+    for (const std::string& p : files) {
+        Way w;
+        if (!w.load(p)) continue;
+        // --overlay: the editor's segment attr/width edits (and node edits, which
+        // only the ground profile below ignores) for this tile.  No-op without it.
+        overlay_.applyWay(w, wayTileStem(p));
+        ++nFiles;
+        for (const auto& sg : w.segments()) waySegs_.push_back(sg);
+    }
+    LOG("gameplay: %zu road segments from %zu .way files", waySegs_.size(), nFiles);
+}
+
 void App::indexWayNodes() {
     if (!wayNodes_.empty()) return;
+    collectWaySegments();          // waySegs_ is shared with the ground profile
     for (const std::string& base : worldTileNames_) {
         Way w;
         if (!w.load(base + ".way")) continue;
+        // --overlay: a moved/added/deleted node changes where the scripts'
+        // parking bays, services, ambushes and map markers sit.
+        overlay_.applyWay(w, wayTileStem(base));
         for (const auto& room : w.rooms)
             for (const auto& n : room.nodes)
                 if (!n.name.empty()) wayNodes_[n.name] = n;
-        for (const auto& sg : w.segments()) waySegs_.push_back(sg);
     }
     LOG("gameplay: %zu named .way nodes, %zu road segments indexed",
         wayNodes_.size(), waySegs_.size());
@@ -629,7 +761,16 @@ void App::spawnParkedVehicles() {
               parked_.submeshesMutable().swap(subs); }
             const float px = (float)it->second.pos.x;
             const float pz = (float)it->second.pos.z;
-            const float ph = (float)it->second.pos.y;
+            // The bay node's own height is the `.way` road height and matches the
+            // authored asphalt to a 0.00 m median (docs/terrain_road.md), so it is
+            // kept.  The ground map is asked only for the *road profile* fallback
+            // when the node carries no height - its terrain field is metres below
+            // the carriageway and would sink the parked car into the asphalt.
+            float ph = (float)it->second.pos.y;
+            if (ph == 0.0f) {
+                float rh = 0.0f;
+                if (ground_.surfaceOnRoad(px, pz, rh)) ph = rh;
+            }
             // heading: follow the nearest road segment, so cars line up with the road
             float yaw = 0.0f, best = 80.0f * 80.0f;
             for (const auto& sg : waySegs_) {
@@ -758,51 +899,67 @@ static void modelBody(const std::vector<B3D::SubMesh>& subs, float& length, floa
 // AI traffic: the road graph is every RSEG polyline of every tile, welded at
 // exactly coincident endpoints (verified: the shipped endpoints coincide).
 // ---------------------------------------------------------------------------
-// Node events from mod_*.sch: each names a .way node; when the player drives
-// inside the trigger radius the message from the script is shown.  STATEBORDER
-// events carry no text (they mark a border crossing).
+// Node events from mod_*.sch.  Their conditions are engine code, not Scheme:
+// king.exe calls onNodePass (file offset 0xb100 / VA 0x40b100) for a road
+// PositionId transition, filters the travel direction with a dot product and
+// suppresses a repeat for eight seconds.  ScriptRuntime owns that recovered
+// state machine; the small radius only maps our free-driving pose back to the
+// named .way node because this port does not expose a player PositionId yet.
 void App::prepareNodeEvents() {
-    if (!events_.empty() || gameData_.nodeEvents.empty()) return;
+    if (scriptRuntime_ || gameData_.nodeEvents.empty()) return;
     indexWayNodes();
-    events_.resize(gameData_.nodeEvents.size());
+    scriptRuntime_.reset(new ScriptRuntime(gameData_));
+    scriptRuntime_->setNodePassRadius(std::max(0.0f, opt_.eventRadius));
+    scriptRuntime_->setSeed(rng_);
+    std::vector<ScriptNodePos> nodes;
+    nodes.reserve(wayNodes_.size());
+    for (const auto& kv : wayNodes_)
+        nodes.push_back({kv.first, kv.second.pos.x, kv.second.pos.z});
+    scriptRuntime_->setNodePositions(nodes);
+
     size_t resolved = 0;
-    for (size_t i = 0; i < gameData_.nodeEvents.size(); ++i) {
-        auto it = wayNodes_.find(gameData_.nodeEvents[i].wayNode);
-        if (it == wayNodes_.end()) continue;
-        events_[i].x = (float)it->second.pos.x;
-        events_[i].z = (float)it->second.pos.z;
-        events_[i].has = true;
-        ++resolved;
-    }
+    for (const auto& e : gameData_.nodeEvents)
+        if (wayNodes_.find(e.wayNode) != wayNodes_.end()) ++resolved;
+
+    // The original passes the road-link direction even on the first position
+    // update.  Seed the equivalent previous sample one metre behind the truck.
+    float fx = 0.0f, fz = 1.0f;
+    vehicle3d_.forward(fx, fz);
+    scriptRuntime_->setPreviousPosition(vehicle3d_.x() - fx, vehicle3d_.z() - fz);
+
     size_t withText = 0;
     for (const auto& ne : gameData_.nodeEvents) if (!ne.text.empty()) ++withText;
     LOG("events: %zu node events (%zu carry a message), %zu nodes resolved",
-        events_.size(), withText, resolved);
+        gameData_.nodeEvents.size(), withText, resolved);
 }
 
 void App::updateNodeEvents(float dt) {
-    if (events_.empty() || gameData_.nodeEvents.empty()) return;
     if (msgTimer_ > 0.0f) { msgTimer_ -= dt; msgAge_ += dt; }
-    const float px = vehicle3d_.x(), pz = vehicle3d_.z();
-    const float r2 = opt_.eventRadius * opt_.eventRadius;
-    for (size_t i = 0; i < events_.size() && i < gameData_.nodeEvents.size(); ++i) {
-        if (!events_[i].has) continue;
-        float dx = events_[i].x - px, dz = events_[i].z - pz;
-        float d2 = dx * dx + dz * dz;
-        if (events_[i].armed && d2 <= r2) {
-            events_[i].armed = false;
-            const std::string& t = gameData_.nodeEvents[i].text;
-            if (!t.empty()) {
-                // The original routes the script text through its 4-line message
-                // ring and shows it in the strip's pager window with the blinking
-                // "new message" icon (docs/original_ui.md 2.4).
-                pushMessage(cp1251ToUtf8(t), "node event " + gameData_.nodeEvents[i].id);
-                LOG("events: '%s' (%s) at %.0f %.0f", gameData_.nodeEvents[i].id.c_str(),
-                    gameData_.nodeEvents[i].kind.c_str(), px, pz);
-            }
-        } else if (!events_[i].armed && d2 > r2 * 2.5f) {
-            events_[i].armed = true;              // re-arm once well past it
-        }
+    if (!scriptRuntime_) return;
+
+    scriptTime_ += std::max(0.0f, dt);
+    ScriptWorldState st;
+    st.time = scriptTime_;
+    st.hour = timeOfDay_;
+    st.weather = weatherAmount_;
+    st.money = economy_.money();
+    st.damage = vehicle3d_.damage();
+    st.px = vehicle3d_.x();
+    st.pz = vehicle3d_.z();
+    st.havePosition = true;
+    scriptRuntime_->update(st);
+
+    for (const NodeEventState* fired : scriptRuntime_->pendingBorders()) {
+        currentRegion_ = fired->def->id;
+        LOG("events: state border '%s' at %.0f %.0f", currentRegion_.c_str(), st.px, st.pz);
+    }
+    for (const NodeEventState* fired : scriptRuntime_->pendingMessages()) {
+        const GameData::NodeEvent& e = *fired->def;
+        if (e.text.empty()) continue;
+        // The original routes the script text through its 4-line message ring
+        // and shows it in the strip pager with the blinking new-message icon.
+        pushMessage(cp1251ToUtf8(e.text), "node event " + e.id);
+        LOG("events: '%s' (%s) at %.0f %.0f", e.id.c_str(), e.kind.c_str(), st.px, st.pz);
     }
 }
 
@@ -870,7 +1027,12 @@ void App::spawnTraffic() {
             trafficYOff_.push_back(off);
             trafficIntact_.push_back(idIntact);
             trafficDamaged_.push_back(idDented);
-            traffic_.setBody((int)ids.size() - 1, len, rad);   // capsule for contacts
+              traffic_.setBody((int)ids.size() - 1, len, rad);   // capsule for contacts
+              bool freight = false;
+              for (const auto& def : gameData_.vehicles)
+                  if (def.model == model && (def.klass == "lorry" || def.klass == "tractor"))
+                      freight = true;
+              traffic_.setFreightModel((int)ids.size() - 1, freight);
             LOG("traffic: model %-10s body %.2f x %.2f m, ground offset %.2f, "
                 "skin %zu/%zu tris (intact/dented)",
                 model, (double)len, (double)(2.0f * rad), (double)off,
@@ -929,12 +1091,19 @@ void App::drawTraffic(float cx, float cy, float cz, float yaw, float pitch) {
     if (cars.empty()) return;
     r_.beginTraffic(cx, cy, cz, yaw, pitch);
     for (const auto& c : cars) {
-        // The traffic height comes from the road graph itself (the .way node
-        // heights, `c.h`): the ground map takes the *lowest* vertex per cell, so
-        // on a bridge it holds the water/terrain below the deck and the cars sank
-        // through it.  The ground map is only a fallback when the graph has no
-        // height for the car.
-        float y = (c.h != 0.0f) ? c.h : (ground_.empty() ? 0.0f : ground_.heightAt(c.x, c.z, 0.0f));
+        // The graph gives the centre-line profile (`Car::h` is the `.way` road
+        // height, blended across junctions by Traffic).  It is the road surface,
+        // and it is what a car has to be drawn at: the GroundMap is a *terrain*
+        // field that runs several metres below the asphalt (docs/terrain_road.md
+        // measured 4.5..8.8 m over the whole network), so substituting it lifted
+        // or sank the cars.  Only when the graph has no height at all (a legacy
+        // zero) is the map asked for a surface, and then only its road profile.
+        float y = c.h;
+        if (c.h == 0.0f) {
+            float rh = 0.0f;
+            if (ground_.surfaceOnRoad(c.x, c.z, rh)) y = rh;
+            else if (!ground_.empty()) y = ground_.heightAt(c.x, c.z, 0.0f);
+        }
         int batch = -1;
         if (c.model >= 0 && c.model < (int)trafficYOff_.size()) {
             const size_t mi = (size_t)c.model;
@@ -1382,9 +1551,9 @@ int App::nearestService(bool wantFuel) const {
 
 bool App::refuel(long* paidOut) {
     if (nearestService(true) < 0) return false;
-    float need = 1.0f - vehicle3d_.fuel();
+    const float need = 1.0f - vehicle3d_.fuel();
     if (need < 0.03f) return false;
-    long cost = (long)(need * 1800.0f);
+    const long cost = refuelPrice();
     if (economy_.money() < cost) return false;
     economy_.addMoney(-cost);
     vehicle3d_.setFuel(1.0f);
@@ -1394,14 +1563,23 @@ bool App::refuel(long* paidOut) {
 
 bool App::repair(long* paidOut) {
     if (nearestService(false) < 0) return false;
-    float dmg = vehicle3d_.damage();
+    const float dmg = vehicle3d_.damage();
     if (dmg < 0.02f) return false;
-    long cost = (long)(dmg * 6000.0f);
+    const long cost = repairPrice();
     if (economy_.money() < cost) return false;
     economy_.addMoney(-cost);
     vehicle3d_.repair();
     if (paidOut) *paidOut = cost;
     return true;
+}
+
+long App::refuelPrice() const {
+    const float need = 1.0f - vehicle3d_.fuel();
+    return need <= 0.0f ? 0 : (long)(need * 1800.0f);
+}
+
+long App::repairPrice() const {
+    return (long)(vehicle3d_.damage() * 6000.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -1413,7 +1591,8 @@ void App::initAmbushes() {
     if (ambushes_.empty()) indexWayNodes();
     ambushes_.clear();
     size_t resolved = 0;
-    for (const auto& am : gameData_.ambushes) {
+    for (size_t ai = 0; ai < gameData_.ambushes.size(); ++ai) {
+        const auto& am = gameData_.ambushes[ai];
         auto it = wayNodes_.find(am.wayNode);
         if (it == wayNodes_.end()) continue;
         AmbushState st;
@@ -1423,7 +1602,7 @@ void App::initAmbushes() {
         st.klass = am.klass;
         st.cars = (int)std::min<size_t>(am.slots.size(), 5);
         if (st.cars < 1) st.cars = 1;
-        st.radius = 120.0f;
+        st.scriptIndex = ai;
         ambushes_.push_back(st);
         ++resolved;
     }
@@ -1431,12 +1610,12 @@ void App::initAmbushes() {
 }
 
 void App::updateAmbushes() {
-    if (ambushes_.empty()) return;
+    if (ambushes_.empty() || !scriptRuntime_) return;
+    const auto& runtime = scriptRuntime_->ambushes();
     const float px = vehicle3d_.x(), pz = vehicle3d_.z();
     for (auto& a : ambushes_) {
         if (a.fired) continue;
-        float dx = a.x - px, dz = a.z - pz;
-        if (dx * dx + dz * dz > a.radius * a.radius) continue;
+        if (a.scriptIndex >= runtime.size() || runtime[a.scriptIndex].fires <= 0) continue;
         a.fired = true;
         ++ambushesFired_;
         // spawn the roadblock: cars lined up across the road, facing the player
@@ -1485,7 +1664,9 @@ void App::updateAmbushes() {
         msgAge_ = 0.0f;
         msgNew_ = true;
         LOG("message: '%s' (ambush %s)", msgText_.c_str(), a.klass.c_str());
-        hiddenGroups_.clear();          // force a rebuild so the cars appear
+        // Rebuild to include the newly appended cars, but keep the current
+        // script-controlled hidden groups.  Clearing the set made every gated
+        // object flash visible for the frame in which an ambush appeared.
         rebuildWorldScene();
         if (input_.rumbleSupported()) input_.rumble(0.9f, 0.6f, 400);
         break;
@@ -1519,7 +1700,6 @@ void App::updateGates() {
         gatesBuilt_ = true;
     }
     std::set<std::string> hidden;
-    const bool day = dayTime();
     // Street lighting: the engine's own clock drives the three illumination
     // levels (no script mentions them).  13 = off/day, 14 = dusk/dawn,
     // 15 = night; only the current level's group is drawn.
@@ -1535,16 +1715,23 @@ void App::updateGates() {
             hidden.insert(name);
         }
     }
-    // Road works / barriers: the obstacle keys carry the closed state.  With no
-    // event simulation yet every obstacle starts closed (its geometry is shown);
-    // --obstacles open hides them so the toggle can be verified.
-    for (const auto& ob : gameData_.obstacles)
-        if (opt_.obstaclesOpen) hidden.insert(ob.key);
-    for (const auto& g : gameData_.gates) {
-        bool on = (g.kind == "UNCONDITIONAL") || (g.kind == "DAYONLY" && day) ||
-                  (g.kind == "DAYGW" && day);              // weather is always good for now
-        if (on && g.prob < 0.999f) on = (trand(rng_) < g.prob);   // density field
-        if (!on) hidden.insert(g.key);
+    // ScriptRuntime is the recovered king.exe state machine.  It owns the
+    // day/weather/probability conditions and the timed single-closure obstacle
+    // selection; the renderer merely reflects that state into B3D key groups.
+    if (scriptRuntime_) {
+        for (const auto& o : scriptRuntime_->obstacles())
+            // king.exe 0x42b060/0x42b3a0 hide the group of the obstacle that IS
+            // closed (the group holds the open-road variant the block replaces),
+            // so the test is `o.closed`; with `!o.closed` every group was hidden
+            // in every frame and the --obstacles toggle did nothing.
+            if (opt_.obstaclesOpen || o.closed) hidden.insert(o.def->key);
+        for (const auto& g : scriptRuntime_->gates())
+            if (!g.visible) hidden.insert(g.def->key);
+    } else {
+        for (const auto& ob : gameData_.obstacles)
+            if (opt_.obstaclesOpen) hidden.insert(ob.key);
+        for (const auto& g : gameData_.gates)
+            if (g.kind != "UNCONDITIONAL") hidden.insert(g.key);
     }
     if (getenv("HT2_GATE_DEBUG")) {
         size_t n = 0;
@@ -1553,6 +1740,10 @@ void App::updateGates() {
         for (const auto& sm : worldMeshes_)
             if (!sm.group.empty()) hist[sm.group]++;
         LOG("gates: %zu distinct mesh groups", hist.size());
+        if (scriptRuntime_)
+            for (const auto& o : scriptRuntime_->obstacles())
+                LOG("gates: obstacle '%s' closed=%d meshes=%zu", o.def->key.c_str(),
+                    o.closed ? 1 : 0, hist[o.def->key]);
         n = 0;
         for (const auto& kv : hist) {
             LOG("gates: group '%s' x%zu", kv.first.c_str(), kv.second);
@@ -1605,13 +1796,28 @@ void App::loadWorldTiles() {
     }
     {
         std::vector<float> roadPts;
-        for (const auto& sg : way_.segments())
-            for (const auto& p : sg.pts) {
+        // The exact profile index: (x, z, y, segment id) per `.way` vertex.  The
+        // flat stream is still what GroundMap::build() seeds its cells with.
+        std::vector<float> roadSegs;
+        for (size_t s = 0; s < waySegs_.size(); ++s)
+            for (const auto& p : waySegs_[s].pts) {
                 roadPts.push_back((float)p.x);
                 roadPts.push_back((float)p.z);
                 roadPts.push_back((float)p.y);
+                roadSegs.push_back((float)p.x);
+                roadSegs.push_back((float)p.z);
+                roadSegs.push_back((float)p.y);
+                roadSegs.push_back((float)s);
             }
+        LOG("ground: road profile from %zu segments of %zu tiles (%zu points)",
+            waySegs_.size(), worldTileNames_.size(), roadPts.size() / 3);
         ground_.build(worldMeshes_, roadPts, 12.0f, &terrain_);
+        ground_.setRoadSegments(roadSegs);
+        // The tiles' own asphalt (src/world/RoadSurface.cpp): the surface between
+        // the `.way` profile and the terrain, used where the network ends (the aa
+        // warehouse: the carriageway runs to z = -4575, the network stops at
+        // -4615) and over unmapped aprons/depots.
+        ground_.buildRoadSurface(worldMeshes_);
     }
     LOG("app: world = %zu tiles, %zu submeshes", files.size(), total);
 }
@@ -1619,8 +1825,12 @@ void App::loadWorldTiles() {
 bool App::loadData() {
     timeOfDay_ = opt_.startHour;
     dayLength_ = opt_.dayLength;
+    // --overlay FILE (docs/editor.md): read the map/vehicle editor's output
+    // before anything reads a .way or COMMON/TRUCKS.B3D.  No flag = no-op.
+    if (!opt_.overlay.empty()) overlay_.load(opt_.overlay);
     if (opt_.view == "cockpit") viewMode_ = 1;
     else if (opt_.view == "bonnet") viewMode_ = 2;
+    else viewMode_ = 0;
     // The original configuration lives in the game's own scripts; decrypt and
     // parse them first so the spawn point and the player's truck come from the
     // shipped data instead of hard-coded constants.
@@ -1648,6 +1858,30 @@ bool App::loadData() {
     weatherTime_ = opt_.weatherCyclePhase * 18.0f;
     if (!way_.load(opt_.dataDir + "/ENV/aa.way"))
         LOG("app: no road network (ENV/aa.way)");
+    // --overlay: the road ribbon the renderer draws from way_ (buildRoadMesh)
+    // picks up the editor's node moves and segment attr/width edits here.
+    overlay_.applyWay(way_, "aa");
+    // Every tile has its own .way; the ground's drivable road profile has to be
+    // built from all of them (a single tile's network covers a tenth of the
+    // island, so nine tenths of the roads would have no profile at all).
+    collectWaySegments();
+
+    // Resolve the player start before realising proximity-streamed objects.
+    // spawnParkedVehicles() filters bays against spawn_, so doing this after
+    // that call silently selected cars around (0, 0) instead of around the
+    // requested/script start position.
+    spawn_[0] = -3020.0f;
+    spawn_[1] = -4625.0f;
+    spawn_[2] = 0.0f;
+    if (gameData_.haveStart && !opt_.spawnGiven) {
+        spawn_[0] = gameData_.startPos[0];
+        spawn_[1] = gameData_.startPos[1];
+    }
+    if (opt_.spawnGiven) {
+        spawn_[0] = opt_.spawnOverride[0];
+        spawn_[1] = opt_.spawnOverride[1];
+        spawn_[2] = opt_.spawnOverride[2];
+    }
 
     SceneTextures::loadPalette(opt_.dataDir + "/COMMON/common1.res");
     haveMenuScene_ = menuScene_.load(opt_.dataDir + "/MENV/dr.b3d");
@@ -1693,26 +1927,18 @@ bool App::loadData() {
     if (opt_.scene == "vehicle") {
         state_ = State::Vehicle;
         haveTrucks_ = trucks_.load(opt_.dataDir + "/COMMON/TRUCKS.B3D");
-        if (haveTrucks_) trucks_.buildNamedScene(opt_.vehicle);
+        // --overlay: the same anchor-before / parts-after rule as the world path.
+        if (haveTrucks_) {
+            overlay_.applyAnchors(trucks_, opt_.vehicle);
+            trucks_.buildNamedScene(opt_.vehicle);
+            overlay_.applyParts(trucks_.submeshesMutable(), opt_.vehicle);
+        }
     } else if (opt_.scene == "world" || opt_.trafficReport > 0.0f) {
         state_ = State::World;
     } else {
         state_ = State::Menu;
     }
 
-    // start position of the world (from ENV/GAME.CNF: (startposition -3020 -4625 20))
-    spawn_[0] = -3020.0f;
-    spawn_[1] = -4625.0f;
-    spawn_[2] = 0.0f;
-    if (gameData_.haveStart && !opt_.spawnGiven) {
-        spawn_[0] = gameData_.startPos[0];
-        spawn_[1] = gameData_.startPos[1];
-    }
-    if (opt_.spawnGiven) {
-        spawn_[0] = opt_.spawnOverride[0];
-        spawn_[1] = opt_.spawnOverride[1];
-        spawn_[2] = opt_.spawnOverride[2];
-    }
     worldCam_[0] = spawn_[0];
     worldCam_[1] = 220.0f;
     worldCam_[2] = spawn_[1];
@@ -1907,7 +2133,121 @@ void App::escAction(const std::string& act) {
         return;
     }
     if (act.rfind("open:", 0) == 0) return;        // handled inside EscMenu
+
+    long paid = 0;
+    if (act == "refuel") {
+        if (refuel(&paid)) {
+            LOG("ui: refuelled for %ld, fuel %.2f, money %ld", paid,
+                vehicle3d_.fuel(), economy_.money());
+            input_.rumble(0.3f, 0.15f, 120);
+        } else LOG("ui: refuel refused (fuel %.2f, money %ld)",
+                   vehicle3d_.fuel(), economy_.money());
+        return;
+    }
+    if (act == "repair") {
+        if (repair(&paid)) LOG("ui: repaired for %ld, damage %.2f, money %ld", paid,
+                              vehicle3d_.damage(), economy_.money());
+        else LOG("ui: repair refused (damage %.2f, money %ld)",
+                 vehicle3d_.damage(), economy_.money());
+        return;
+    }
+    if (act == "tune") {
+        const std::string id = esc_.selectedUpgrade();
+        const long price = esc_.selectedUpgradePrice();
+        if (id.empty() || price <= 0) { LOG("ui: no upgrade selected"); return; }
+        if (esc_.upgradeBought(id)) { LOG("ui: '%s' is already installed", id.c_str()); return; }
+        if (economy_.money() < price) {
+            LOG("ui: '%s' costs %ld, money %ld - not enough", id.c_str(), price, economy_.money());
+            return;
+        }
+        economy_.addMoney(-price);
+        esc_.markUpgradeBought(id);
+        LOG("ui: '%s' installed for %ld, money %ld", id.c_str(), price, economy_.money());
+        return;
+    }
+    if (act == "tuneall") {
+        long sum = 0;
+        const auto upgrades = esc_.upgradeList();
+        for (const auto& u : upgrades)
+            if (!esc_.upgradeBought(u.first)) sum += u.second;
+        if (sum <= 0) { LOG("ui: every upgrade is already installed"); return; }
+        if (economy_.money() < sum) {
+            LOG("ui: all upgrades cost %ld, money %ld - not enough", sum, economy_.money());
+            return;
+        }
+        economy_.addMoney(-sum);
+        for (const auto& u : upgrades) esc_.markUpgradeBought(u.first);
+        LOG("ui: all upgrades installed for %ld, money %ld", sum, economy_.money());
+        return;
+    }
+    if (act == "acceptjob") {
+        const int idx = esc_.selectedJob();
+        if (idx >= 0 && economy_.accept((size_t)idx)) {
+            const Economy::Job* j = economy_.activeJob();
+            LOG("ui: job accepted: %s -> %s, %.0f m, reward %ld",
+                j ? j->fromTown.c_str() : "?", j ? j->toTown.c_str() : "?",
+                j ? j->distance : 0.0f, j ? j->reward : 0);
+        } else LOG("ui: no job to accept");
+        return;
+    }
+    if (act == "deliverjob") {
+        long reward = 0;
+        if (economy_.deliver(vehicle3d_.x(), vehicle3d_.z(), 120.0f, &reward))
+            LOG("ui: job delivered, reward %ld, money %ld", reward, economy_.money());
+        else LOG("ui: nothing to deliver here");
+        return;
+    }
+    if (act == "buyvehicle") {
+        const int idx = esc_.selectedOffer();
+        if (idx < 0 || (size_t)idx >= economy_.offers().size()) {
+            LOG("ui: no vehicle selected"); return;
+        }
+        const Economy::Offer offer = economy_.offers()[(size_t)idx];
+        const long tradeIn = economy_.ownedValue();
+        if (economy_.buy((size_t)idx, tradeIn)) {
+            switchPlayerVehicle(offer.model);
+            LOG("ui: bought %s for %ld (trade-in %ld), money %ld",
+                offer.model.c_str(), offer.price, tradeIn, economy_.money());
+        } else LOG("ui: cannot buy %s (money %ld)", offer.model.c_str(), economy_.money());
+        return;
+    }
+    if (act == "changevehicle") { syncEscContext(); esc_.open("sale"); return; }
+    if (act == "hiredriver") {
+        hiredDriver_ = esc_.selectedHireName();
+        LOG("ui: driver hired: %s", hiredDriver_.empty() ? "-" : hiredDriver_.c_str());
+        return;
+    }
+    if (act == "firedriver") {
+        LOG("ui: driver fired: %s", hiredDriver_.empty() ? "-" : hiredDriver_.c_str());
+        hiredDriver_.clear();
+        return;
+    }
+    if (act == "cbsearch") { esc_.open("cbtalk"); return; }
+    if (act == "cbask" || act == "cbok" || act == "cbtalk" || act == "cbcolor") {
+        LOG("ui: CB radio '%s' (%s)", act.c_str(), esc_.lastButton().c_str());
+        return;
+    }
+    if (act == "yes" || act == "no") { LOG("ui: popup answer '%s'", act.c_str()); return; }
     LOG("esc: unhandled action '%s'", act.c_str());
+}
+
+void App::syncEscContext() {
+    // Preserve the deterministic panel-only fixture used by screenshot tests.
+    // The fixture deliberately has no world Context; production never sets it.
+    const char* demo = getenv("HT2_UI_DEMO");
+    if (demo && *demo && *demo != '0') return;
+    EscMenu::Context uc;
+    uc.economy = &economy_;
+    uc.vehicle = &vehicle3d_;
+    uc.way = &way_;
+    uc.gameData = &gameData_;
+    uc.clockHours = timeOfDay_;
+    uc.refuelCost = refuelPrice();
+    uc.repairCost = repairPrice();
+    uc.fuelPerLitre = 9;
+    uc.driverName = hiredDriver_;
+    uc.slotText = saveSummary();
+    esc_.setContext(uc);
 }
 
 // --esc-act NAME[,NAME...]: the same path a click/keyboard activation takes, so
@@ -2034,6 +2374,9 @@ bool App::saveGame() {
     fprintf(f, "damage %.4f\n", vehicle3d_.damage());
     fprintf(f, "job %d\n", jobIndex);
     fprintf(f, "delivered %zu\n", economy_.delivered());
+    if (!hiredDriver_.empty()) fprintf(f, "driver %s\n", hiredDriver_.c_str());
+    for (const std::string& id : esc_.boughtUpgrades())
+        fprintf(f, "upgrade %s\n", id.c_str());
     fclose(f);
     LOG("esc: savegame written to %s "
         "(money %ld, pos %.0f %.0f yaw %.0f, fuel %.2f, damage %.2f, job %d)",
@@ -2063,6 +2406,9 @@ bool App::loadGame() {
     float x = vehicle3d_.x(), z = vehicle3d_.z(), yaw = vehicle3d_.yaw();
     float fuel = vehicle3d_.fuel(), damage = vehicle3d_.damage();
     int jobIndex = -1;
+    std::string savedVehicle;
+    std::string driver;
+    std::vector<std::string> upgrades;
     char line[256];
     while (fgets(line, sizeof line, f)) {
         if (line[0] == '#') continue;
@@ -2072,15 +2418,26 @@ bool App::loadGame() {
         if (sscanf(line, "money %ld", &money) == 1) continue;
         if (sscanf(line, "job %d", &jobIndex) == 1) continue;
         if (sscanf(line, "delivered %d", &delivered) == 1) continue;
+        char value[192];
+        if (sscanf(line, "vehicle %191s", value) == 1) { savedVehicle = value; continue; }
+        if (sscanf(line, "driver %191[^\n]", value) == 1) { driver = value; continue; }
+        if (sscanf(line, "upgrade %191s", value) == 1) { upgrades.push_back(value); continue; }
     }
     fclose(f);
+    if (!savedVehicle.empty()) {
+        economy_.restorePlayerModel(savedVehicle);
+        switchPlayerVehicle(savedVehicle);
+    }
     vehicle3d_.reset(x, z, yaw);
     vehicle3d_.setFuel(std::max(0.0f, std::min(1.0f, fuel)));
     vehicle3d_.repair();
     if (damage > 0.0f) vehicle3d_.addDamage(damage);
     economy_.setMoney(money);
-    if (jobIndex >= 0 && jobIndex < (int)economy_.jobs().size())
-        economy_.accept((size_t)jobIndex);
+    economy_.restoreProgress(delivered < 0 ? economy_.delivered() : (size_t)delivered,
+                             jobIndex);
+    hiredDriver_ = driver;
+    esc_.clearBoughtUpgrades();
+    for (const std::string& id : upgrades) esc_.markUpgradeBought(id);
     LOG("esc: savegame loaded from %s (v%d) "
         "(money %ld, pos %.0f %.0f yaw %.0f, fuel %.2f, damage %.2f, job %d)",
         path.c_str(), version, money, x, z, yaw, fuel, damage, jobIndex);
@@ -2451,7 +2808,12 @@ void App::enterWorld() {
     if (!hud_.loaded()) hud_.load(r_, opt_.dataDir);
     if (!haveTrucks_) {
         haveTrucks_ = trucks_.load(opt_.dataDir + "/COMMON/TRUCKS.B3D");
-        if (haveTrucks_) trucks_.buildNamedScene(opt_.vehicle);
+        if (haveTrucks_) {
+            // --overlay: anchors before the assembly, parts after it.
+            overlay_.applyAnchors(trucks_, opt_.vehicle);
+            trucks_.buildNamedScene(opt_.vehicle);
+            overlay_.applyParts(trucks_.submeshesMutable(), opt_.vehicle);
+        }
     }
     if (haveTrucks_) {
         if (vehicleTex_.count() == 0)
@@ -2465,6 +2827,7 @@ void App::enterWorld() {
         mirror_.load(r_, opt_.dataDir, &trucks_.anchorList, opt_.vehicle);
     }
     vehicle3d_.setGround(&ground_);
+    vehicle3d_.setRoads(&ground_);
     vehicle3d_.reset(spawn_[0], spawn_[1], spawn_[2]);
     step("COMMON/TRUCKS.B3D");
     indexWayNodes();
@@ -2716,6 +3079,17 @@ void App::applyWeather(float dt) {
     if (weatherAmount_ > 0.0f && weatherKind_ == 0 && !opt_.weatherCycle) weatherAmount_ = 1.0f;
 }
 
+bool App::handleWorldPanelKey(int key) {
+    const std::string name = key == SDLK_ESCAPE ? "main" : esc_.hotkey(key);
+    if (name.empty()) return false;
+    syncEscContext();
+    esc_.open(name);
+    esc_.setSlotText(saveSummary());
+    if (audio_.ready()) audio_.engineStop();
+    LOG("ui: hotkey opened '%s'", name.c_str());
+    return esc_.active();
+}
+
 void App::drawWorld(float dt, bool interactive) {
     interactivePass_ = interactive;
     // While an ESC screen is up the world is *paused*: no clock, no vehicle, no
@@ -2740,31 +3114,27 @@ void App::drawWorld(float dt, bool interactive) {
             in.throttle = std::max(-1.0f, std::min(1.0f, st.throttle - st.brake));
             in.steer = st.steer;
             in.handbrake = st.handbrake;
+            auto openPanel = [&](const char* name) {
+                syncEscContext();
+                esc_.open(name);
+                if (audio_.ready()) audio_.engineStop();
+                LOG("ui: opened '%s'", name);
+            };
             if (st.viewToggle) viewMode_ = (viewMode_ + 1) % 3;
             if (st.buy) {
-                const auto& offs = economy_.offers();
-                for (size_t i = 0; i < offs.size(); ++i)
-                    if (!offs[i].owned && offs[i].price <= economy_.money() && economy_.buy(i)) {
-                        switchPlayerVehicle(offs[i].model);
-                        break;
-                    }
+                if (economy_.dealerNear(vehicle3d_.x(), vehicle3d_.z(), 120.0f) >= 0)
+                    openPanel("sale");
             }
             if (st.job) {
                 std::vector<size_t> near = economy_.jobsNear(vehicle3d_.x(), vehicle3d_.z(), 120.0f);
-                if (!near.empty()) economy_.accept(near[0]);
+                if (!near.empty()) openPanel("order");
             }
             if (st.deliver) {
-                long reward = 0;
-                economy_.deliver(vehicle3d_.x(), vehicle3d_.z(), 120.0f, &reward);
+                if (economy_.activeJob()) openPanel("info");
             }
             if (st.map) {                            // fuel / repair (Tab / Back)
-                long paid = 0;
-                if (refuel(&paid)) {
-                    LOG("service: refuelled for %ld, money %ld", paid, economy_.money());
-                    input_.rumble(0.3f, 0.15f, 120);
-                } else if (repair(&paid)) {
-                    LOG("service: repaired for %ld, money %ld", paid, economy_.money());
-                }
+                if (nearestService(true) >= 0) openPanel("fuel");
+                else if (nearestService(false) >= 0) openPanel("service");
             }
             if (st.mapToggle) {                      // M / Select: the road map
                 map_.toggle();                       // (the original's toggle)
@@ -2827,10 +3197,9 @@ void App::drawWorld(float dt, bool interactive) {
         float cx, cy, cz, camYaw, camPitch;
         bool drawTruck = true;
         viewPose(cx, cy, cz, camYaw, camPitch, drawTruck);
-        // The cockpit camera sits inside the cab, well within the default 2.0
-        // near plane, so it uses a closer one (Renderer keeps 2.0 everywhere
-        // else; the value is restored below).
-        r_.setNearPlane(viewMode_ == 1 ? 0.4f : 2.0f);
+        // Keep world depth precision independent of the nearby dashboard.
+        // The loaded cockpit gets its own foreground depth layer below.
+        r_.setNearPlane(viewMode_ == 1 && !cockpit_.loaded() ? 0.4f : 2.0f);
         // Cockpit with a working instrument cluster: cull the truck's exterior
         // shell (from inside the cab only its back faces would be visible, and
         // they would cover the whole screen) - the dashboard comes from the
@@ -2843,7 +3212,12 @@ void App::drawWorld(float dt, bool interactive) {
         r_.draw(cx, cy, cz, camYaw, camPitch);
         if (haveWorldScene_) r_.drawScene(cx, cy, cz, camYaw, camPitch);
         drawTraffic(cx, cy, cz, camYaw, camPitch);
-        if (haveTrucks_ && drawTruck) {
+        // The CABINES.B3D interior is the cockpit foreground. Drawing the
+        // exterior truck around an eye located inside it leaks outward-facing
+        // pieces (mirror arms, fenders and body panels) around the screen edges;
+        // back-face culling cannot remove those genuinely front-facing pieces.
+        // Keep the exterior for the fallback cockpit and bonnet views only.
+        if (haveTrucks_ && drawTruck && !cockpitInstruments) {
             r_.setModel(vehicle3d_.modelMatrix());
             r_.drawVehicleScene(cx, cy, cz, camYaw, camPitch);
             r_.clearModel();
@@ -2851,6 +3225,10 @@ void App::drawWorld(float dt, bool interactive) {
         // Cockpit instruments (src/game/Cockpit.cpp): only in the cockpit view,
         // and only from the deterministic vehicle state (speed/rpm/fuel).
         cockpit_.setVisible(viewMode_ == 1);
+        if (cockpitInstruments) {
+            r_.clearDepth();
+            r_.setNearPlane(0.4f);
+        }
         cockpit_.draw(r_, vehicle3d_.modelMatrix(), vehicle3d_, cx, cy, cz, camYaw, camPitch);
         // Rear-view mirror (src/gfx/Mirror.cpp): re-renders the world from the
         // mirror mount into an offscreen target and blits it under the original
@@ -2939,22 +3317,27 @@ void App::drawWorld(float dt, bool interactive) {
         r_.quad2D(white, bx, by, bw, 42, 0.05f, 0.08f, 0.12f, 0.72f * a);
         font_.draw(r_, msgText_, bx + 20.0f, by + 12.0f, 1.6f, 1.0f, 0.97f, 0.75f, a);
     }
-    if (ambushesFired_ > 0 && msgTimer_ <= 0.0f)
-        font_.draw(r_, "AMBUSH!", 16, (float)r_.height_ - 30, 1.3f, 1.0f, 0.4f, 0.35f, 1.0f);
-    if (nearestService(true) >= 0 && vehicle3d_.fuel() < 0.95f)
-        font_.draw(r_, "PRESS TAB TO REFUEL", 16, (float)r_.height_ - 30, 1.2f, 0.5f, 1.0f, 0.6f, 1.0f);
-    else if (nearestService(false) >= 0 && vehicle3d_.damage() > 0.05f)
-        font_.draw(r_, "PRESS TAB TO REPAIR", 16, (float)r_.height_ - 30, 1.2f, 0.5f, 0.9f, 1.0f, 1.0f);
-    if (nearJobDist() >= 0.0f)
-        font_.draw(r_, "PRESS T TO TAKE THE CARGO JOB", 16, (float)r_.height_ - 30, 1.2f,
-                   1.0f, 0.9f, 0.4f, 1.0f);
-    font_.draw(r_, "W/S: THROTTLE  A/D: STEER  SPACE: BRAKE  C: VIEW  B: BUY  T: JOB  Y: DELIVER  ESC: MENU",
-               16, (float)r_.height_ - 16, 1.0f, 0.85f, 0.87f, 0.92f, 0.9f);
+    if (!esc_.active()) {
+        if (ambushesFired_ > 0 && msgTimer_ <= 0.0f)
+            font_.draw(r_, "AMBUSH!", 16, (float)r_.height_ - 30, 1.3f, 1.0f, 0.4f, 0.35f, 1.0f);
+        if (nearestService(true) >= 0 && vehicle3d_.fuel() < 0.95f)
+            font_.draw(r_, "PRESS TAB TO REFUEL", 16, (float)r_.height_ - 30, 1.2f, 0.5f, 1.0f, 0.6f, 1.0f);
+        else if (nearestService(false) >= 0 && vehicle3d_.damage() > 0.05f)
+            font_.draw(r_, "PRESS TAB TO REPAIR", 16, (float)r_.height_ - 30, 1.2f, 0.5f, 0.9f, 1.0f, 1.0f);
+        if (nearJobDist() >= 0.0f)
+            font_.draw(r_, "PRESS T TO TAKE THE CARGO JOB", 16, (float)r_.height_ - 30, 1.2f,
+                       1.0f, 0.9f, 0.4f, 1.0f);
+        font_.draw(r_, "F1-F3: HELP  F4: COMPANY  F5: CB RADIO  W/S: THROTTLE  A/D: STEER  SPACE: BRAKE  C/V: VIEW  ESC: MENU",
+                   16, (float)r_.height_ - 16, 1.0f, 0.85f, 0.87f, 0.92f, 0.9f);
+    } else if (hud_.loaded()) {
+        hud_.drawPause(r_);
+    }
     r_.end2D();
 
     // --- in-game ESC screens: the original 1200-px panels, 1:1, on top -------
     if (esc_.active()) {
         if (esc_.screen() == "save" || esc_.screen() == "load") esc_.setSlotText(saveSummary());
+        syncEscContext();
         esc_.draw(r_, font_);
     }
 }
@@ -3073,6 +3456,674 @@ int App::trafficReport() {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// --road-probe: quantitative measurement of the two open complaints.
+//
+// A. "the cars fly and sink through the ground": the vertical error between the
+//    height the traffic is DRAWN at and the real road surface under each wheel.
+//    The drawn height is exactly what drawTraffic() computes (the graph height
+//    `Car::h`, optionally replaced by the ground map), evaluated at the lane
+//    centre of every point of the road network; the surface is the authored tile
+//    triangle under the wheel contact point (a real ray cast through the B3D
+//    geometry, not a rasterisation of it).
+// B. "the road shakes": the vertical gap between the asphalt and the generated
+//    ground mesh, sampled with Renderer::groundHeightAt() - the mesh's own
+//    evaluation - so a z-fighting setup (a gap of a few centimetres) can be told
+//    apart from a healthy one.
+// ---------------------------------------------------------------------------
+
+
+// A 5 cm histogram of a vertical error (-100..+100 m), shared by the probes.
+struct ProbeHist {
+    std::vector<int> bin;
+    double sum = 0;
+    size_t n = 0;
+    float maxV = 0, maxX = 0, maxZ = 0;
+    int maxCat = 0;
+    ProbeHist() : bin(4001, 0) {}
+    void add(float v, float x, float z, int cat = 0) {
+        ++n; sum += v;
+        if (std::fabs(v) > maxV) { maxV = std::fabs(v); maxX = x; maxZ = z; maxCat = cat; }
+        int b = (int)std::floor((v + 100.0f) / 0.05f);
+        if (b < 0) b = 0;
+        if (b >= (int)bin.size()) b = (int)bin.size() - 1;
+        ++bin[b];
+    }
+    float quantile(float q) const {
+        if (!n) return 0.0f;
+        size_t want = (size_t)(q * (double)n), acc = 0;
+        for (size_t i = 0; i < bin.size(); ++i) {
+            acc += (size_t)bin[i];
+            if (acc >= want) return (float)((double)i * 0.05 - 100.0);
+        }
+        return 0.0f;
+    }
+    float mean() const { return n ? (float)(sum / (double)n) : 0.0f; }
+};
+
+static const char* kRoadCat[3] = {"plain", "junction", "bridge"};
+
+// The nearest point of any `.way` polyline: the height interpolated there, the
+// perpendicular distance and the segment index.  This is "what the AI drives
+// on" - the reference of the report.
+static bool nearestWayPoint(const std::vector<Way::Seg>& segs, float x, float z,
+                            float& outH, float& outDist, int& outSeg) {
+    bool got = false;
+    float best = 1e30f;
+    for (size_t s = 0; s < segs.size(); ++s) {
+        const Way::Seg& sg = segs[s];
+        if (sg.pts.size() < 2) continue;
+        for (size_t k = 0; k + 1 < sg.pts.size(); ++k) {
+            const Way::Pos& a = sg.pts[k];
+            const Way::Pos& b = sg.pts[k + 1];
+            float ax = (float)a.x, az = (float)a.z;
+            float dx = (float)b.x - ax, dz = (float)b.z - az;
+            float len2 = dx * dx + dz * dz;
+            float u = len2 > 1e-6f ? ((x - ax) * dx + (z - az) * dz) / len2 : 0.0f;
+            if (u < 0.0f) u = 0.0f;
+            if (u > 1.0f) u = 1.0f;
+            float px = ax + dx * u, pz = az + dz * u;
+            float d = (x - px) * (x - px) + (z - pz) * (z - pz);
+            if (d < best) {
+                best = d;
+                outH = (float)(a.y + (b.y - a.y) * u);
+                outSeg = (int)s;
+                got = true;
+            }
+        }
+    }
+    outDist = got ? sqrtf(best) : 1e30f;
+    return got;
+}
+
+// A 2D bucket grid over the world's B3D triangles: the downward ray cast used by
+// the report.  Every triangle remembers whether its material is asphalt.
+struct ProbeColumn {
+    struct Tri { float ax, ay, az, bx, by, bz, cx, cy, cz; bool road; };
+    float cell = 32.0f;
+    std::unordered_map<long long, std::vector<int>> bins;
+    std::vector<Tri> tris;
+    size_t roadTris = 0;
+    static long long key(int x, int z) { return ((long long)x << 32) ^ (unsigned)z; }
+    static bool roadish(const std::string& m) {
+        std::string s = m;
+        for (char& c : s) c = (char)tolower((unsigned char)c);
+        return s.find("road") != std::string::npos || s.find("asfalt") != std::string::npos ||
+               s.find("asphalt") != std::string::npos;
+    }
+    void build(const std::vector<B3D::SubMesh>& meshes) {
+        size_t est = 0;
+        for (const auto& sm : meshes) est += sm.idx.size() / 3;
+        tris.reserve(est);
+        for (const auto& sm : meshes) {
+            const bool road = roadish(sm.material);
+            for (size_t t = 0; t + 2 < sm.idx.size(); t += 3) {
+                uint32_t ia = sm.idx[t], ib = sm.idx[t + 1], ic = sm.idx[t + 2];
+                if ((size_t)ia * 3 + 2 >= sm.pos.size() || (size_t)ib * 3 + 2 >= sm.pos.size() ||
+                    (size_t)ic * 3 + 2 >= sm.pos.size()) continue;
+                const float* a = &sm.pos[(size_t)ia * 3];
+                const float* b = &sm.pos[(size_t)ib * 3];
+                const float* c = &sm.pos[(size_t)ic * 3];
+                int id = (int)tris.size();
+                Tri tr;
+                tr.ax = a[0]; tr.ay = a[2]; tr.az = a[1];
+                tr.bx = b[0]; tr.by = b[2]; tr.bz = b[1];
+                tr.cx = c[0]; tr.cy = c[2]; tr.cz = c[1];
+                tr.road = road;
+                tris.push_back(tr);
+                if (road) ++roadTris;
+                float mnx = std::min(a[0], std::min(b[0], c[0]));
+                float mxx = std::max(a[0], std::max(b[0], c[0]));
+                float mnz = std::min(a[1], std::min(b[1], c[1]));
+                float mxz = std::max(a[1], std::max(b[1], c[1]));
+                int x0 = (int)std::floor(mnx / cell), x1 = (int)std::floor(mxx / cell);
+                int z0 = (int)std::floor(mnz / cell), z1 = (int)std::floor(mxz / cell);
+                if ((double)(x1 - x0 + 1) * (z1 - z0 + 1) > 4.0e5) continue;
+                for (int gz = z0; gz <= z1; ++gz)
+                    for (int gx = x0; gx <= x1; ++gx) bins[key(gx, gz)].push_back(id);
+            }
+        }
+        size_t slots = 0;
+        for (const auto& kv : bins) slots += kv.second.size();
+        LOG("road-probe: tile index %zu triangles (%zu asphalt), %zu bins, %.1f slots/tri",
+            tris.size(), roadTris, bins.size(),
+            tris.empty() ? 0.0 : (double)slots / (double)tris.size());
+    }
+    // Nearest surface in the column in terms of |y - ref|, restricted to
+    // ref +- `win`; `roadOnly` keeps asphalt triangles only.  Returns false when
+    // the column has no such triangle.
+    // Nearest surface to `ref` within +-`win`, favouring nothing: the distance is
+    // the metric, not the value.  `outY` is the surface height (or ref +- dist).
+    bool nearest(float x, float z, float ref, float win, bool roadOnly,
+                 float& outY, bool& outIsRoad) const {
+        float best = 1e30f;
+        bool got = false;
+        auto it = bins.find(key((int)std::floor(x / cell), (int)std::floor(z / cell)));
+        if (it == bins.end()) return false;
+        for (int id : it->second) {
+            const Tri& t = tris[(size_t)id];
+            if (roadOnly && !t.road) continue;
+            float e = (t.bx - t.ax) * (t.cz - t.az) - (t.bz - t.az) * (t.cx - t.ax);
+            if (std::fabs(e) < 1e-9f) continue;
+            float w0 = ((t.bx - x) * (t.cz - z) - (t.bz - z) * (t.cx - x)) / e;
+            float w1 = ((t.cx - x) * (t.az - z) - (t.cz - z) * (t.ax - x)) / e;
+            float w2 = 1.0f - w0 - w1;
+            if (!((w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0))) continue;
+            float y = w0 * t.ay + w1 * t.by + w2 * t.cy;
+            float d = std::fabs(y - ref);
+            if (d > win) continue;
+            if (d < best) { best = d; outY = y; outIsRoad = t.road; got = true; }
+        }
+        return got;
+    }
+};
+
+// Interpolated position/height of a way segment at parameter t.
+static void waySample(const Way::Seg& sg, float t, float& x, float& z, float& h) {
+    int n = (int)sg.pts.size();
+    if (n == 1) {
+        x = (float)sg.pts[0].x; z = (float)sg.pts[0].z; h = (float)sg.pts[0].y;
+        return;
+    }
+    float f = t * (float)(n - 1);
+    int i = (int)f;
+    if (i < 0) i = 0;
+    if (i > n - 2) i = n - 2;
+    float u = f - (float)i;
+    const Way::Pos& a = sg.pts[(size_t)i];
+    const Way::Pos& b = sg.pts[(size_t)i + 1];
+    x = (float)(a.x + (b.x - a.x) * u);
+    z = (float)(a.z + (b.z - a.z) * u);
+    h = (float)(a.y + (b.y - a.y) * u);
+}
+
+
+// --ride-probe x,z: print every layer of the drivable surface at one site (the
+// diagnostic behind the layered-surface work; the tiles' own asphalt, the `.way`
+// profile and the terrain field side by side).
+int App::rideProbeReport() {
+    const float x = opt_.probeX, z = opt_.probeZ;
+    const float terr = ground_.heightAt(x, z, 0.0f);
+    bool f = false;
+    float pd = 0.0f;
+    const float way = ground_.roadProfileAt(x, z, f, pd, 80.0f);
+    float td[3] = {0, 0, 0};
+    bool vis[3] = {false, false, false};
+    float ty[3] = {0, 0, 0};
+    // narrow tolerance around the terrain, wide tolerance, and "pick the highest"
+    const float refs[3] = {terr, terr, 1.0e9f};
+    const float tols[3] = {12.0f, 1.0e9f, 1.0e9f};
+    for (int k = 0; k < 3; ++k)
+        ground_.roadSurface().heightAt(x, z, refs[k], tols[k], ty[k], td[k], vis[k]);
+    LOG("ride-probe: (%.1f, %.1f)", (double)x, (double)z);
+    LOG("ride-probe:   terrain field      %.3f", terr);
+    LOG("ride-probe:   .way profile       %.3f (found %d, horizontal distance %.1f m)",
+        way, f ? 1 : 0, pd);
+    LOG("ride-probe:   tile road (tol 12) %.3f (nearest %.1f m, visible %d)",
+        ty[0], td[0], vis[0] ? 1 : 0);
+    LOG("ride-probe:   tile road (tol inf)%.3f (nearest %.1f m, visible %d)",
+        ty[1], td[1], vis[1] ? 1 : 0);
+    LOG("ride-probe:   tile road (highest)%.3f (nearest %.1f m, visible %d)",
+        ty[2], td[2], vis[2] ? 1 : 0);
+    int src = 0;
+    float got = ground_.drivableY(x, z, terr, &src, nullptr);
+    LOG("ride-probe:   layered surface    %.3f (layer %s)", got,
+        src == 2 ? "tile asphalt" : (src == 1 ? ".way profile" : "terrain"));
+    const float refs2[3] = {opt_.probeR, opt_.probeR + 10.0f, way};
+    for (int k = 0; k < 3; ++k) {
+        int s2 = 0;
+        float g2 = ground_.drivableY(x, z, refs2[k], &s2, nullptr);
+        float td4 = 0.0f, t4 = 0.0f;
+        bool v4 = false;
+        ground_.roadSurface().heightAt(x, z, refs2[k], 12.0f, t4, td4, v4);
+        LOG("ride-probe:   layered ref %8.2f -> %.3f (layer %d), tile %.3f (dist %.1f)",
+            refs2[k], g2, s2, t4, td4);
+    }
+    LOG("ride-probe: RESULT x=%.1f z=%.1f terrain=%.3f way=%.3f wayfound=%d waydist=%.1f "
+        "tile12=%.3f tileinf=%.3f tilehigh=%.3f layered=%.3f layer=%d",
+        (double)x, (double)z, terr, way, f ? 1 : 0, pd, ty[0], ty[1], ty[2], got, src);
+    return 0;
+}
+
+int App::roadProbeReport() {
+    if (!ground_.hasClearance()) {
+        LOG("road-probe: no tile ceiling in the ground map (raw heightmap fallback)");
+        return 4;
+    }
+    const std::vector<Way::Seg>& segs = waySegs_;
+    if (segs.empty()) { LOG("road-probe: no road network"); return 4; }
+
+    ProbeColumn grid;
+    grid.build(worldMeshes_);
+
+    // Junction cells: a 50 m cell whose `.way` points belong to more than one
+    // segment.  ("Any other road point within 20 m" also fires on a parallel
+    // carriageway, which is not a junction.)
+    std::unordered_map<long long, int> cellSeg;
+    auto cellKey = [](int x, int z) { return ((long long)x << 32) ^ (unsigned)z; };
+    for (size_t s = 0; s < segs.size(); ++s)
+        for (const auto& p : segs[s].pts) {
+            long long k = cellKey((int)std::floor((float)p.x / 50.0f),
+                                  (int)std::floor((float)p.z / 50.0f));
+            auto it = cellSeg.find(k);
+            if (it == cellSeg.end()) cellSeg.emplace(k, (int)s + 1);
+            else if (it->second != (int)s + 1) it->second = 0;
+        }
+    auto atJunction = [&](float x, float z) {
+        auto it = cellSeg.find(cellKey((int)std::floor(x / 50.0f), (int)std::floor(z / 50.0f)));
+        return it != cellSeg.end() && it->second == 0;
+    };
+
+    // How many samples have a *reference road surface* under the wheels and how
+    // far the drawn height is from it.
+    size_t srcCount[3] = {0, 0, 0};   // 0 = terrain, 1 = .way, 2 = tile asphalt
+    size_t noTileRoad = 0;            // columns with no tile road triangle
+    ProbeHist drawErr;        // graph height - nearest surface (any window)
+    ProbeHist drawRoad;       // graph height - nearest ASPHALT surface (any window)
+    ProbeHist graphVsMap;     // ground map surfaceAt() - graph height (local road profile)
+    ProbeHist gap;            // asphalt - generated ground mesh
+    size_t samples = 0, onAsphalt = 0, onNone = 0, junctions = 0;
+    size_t errBig5 = 0, errBig20 = 0, asphaltBig5 = 0, noAsphalt = 0;
+    size_t gapSmall = 0, gapAtMin = 0;
+    float gapMin = 1e30f, gapMinX = 0, gapMinZ = 0;
+    size_t asphaltBelowGround = 0;
+    struct Worst { float e = 0, x = 0, z = 0; int cat = 0, seg = -1; bool road = false; } worst;
+    struct Sample { float e, x, z, h, s, gap; int cat, seg; bool road; };
+    std::vector<Sample> siteList, worstList;
+    const bool haveSite = opt_.roadProbeSite;
+    const float siteR = opt_.roadProbeR > 0 ? opt_.roadProbeR : 200.0f;
+    const float off[4][2] = {{0.0f, 2.4f}, {0.0f, -2.4f}, {-1.6f, 0.0f}, {1.6f, 0.0f}};
+    const float win = 40.0f;    // only a surface within 40 units can be "the road"
+
+    for (size_t s = 0; s < segs.size(); ++s) {
+        const Way::Seg& sg = segs[s];
+        if (sg.pts.size() < 2) continue;
+        float len = 0;
+        for (size_t k = 0; k + 1 < sg.pts.size(); ++k) {
+            float dx = (float)(sg.pts[k + 1].x - sg.pts[k].x);
+            float dz = (float)(sg.pts[k + 1].z - sg.pts[k].z);
+            len += sqrtf(dx * dx + dz * dz);
+        }
+        int n = std::max(2, (int)(len / opt_.roadProbeStep) + 1);
+        for (int i = 0; i <= n; ++i) {
+            float x = 0, z = 0, h = 0;
+            waySample(sg, (float)i / (float)n, x, z, h);
+            if (!ground_.inside(x, z)) continue;
+            float hw[4] = {0, 0, 0, 0}, hr[4] = {0, 0, 0, 0};
+            bool haveR[4] = {false, false, false, false};
+            bool ok = true;
+            for (int c = 0; c < 4; ++c) {
+                bool isRoad = false;
+                if (!grid.nearest(x + off[c][0], z + off[c][1], h, win, false, hw[c], isRoad))
+                    { ok = false; break; }
+                bool dummy = false;
+                haveR[c] = grid.nearest(x + off[c][0], z + off[c][1], h, win, true, hr[c], dummy);
+                if (!haveR[c]) hr[c] = h;      // no asphalt in the column at all
+            }
+            if (!ok) { ++onNone; continue; }
+            ++samples;
+            int nRoadW = 0;
+            for (int c = 0; c < 4; ++c) if (haveR[c]) ++nRoadW;
+            if (nRoadW == 4) ++onAsphalt;
+            if (nRoadW == 0) ++noAsphalt;
+            // The reference road surface: the *asphalt* under the wheels when it
+            // exists (a viaduct deck above a valley road or a tunnel roof below it
+            // must not be mistaken for the road the car is on), otherwise the
+            // nearest tile surface there is.
+            float plane = 0.25f * (hw[0] + hw[1] + hw[2] + hw[3]);
+            float pr = 0.25f * (hr[0] + hr[1] + hr[2] + hr[3]);
+            {
+                // Which layer the layered surface answers with here, and whether
+                // the tiles carry a road triangle in this column at all.
+                int src = 0;
+                ground_.drivableY(x, z, h, &src, nullptr);
+                if (src < 0) src = 0;
+                if (src > 2) src = 2;
+                ++srcCount[src];
+                float ty = 0.0f, td = 0.0f;
+                bool vis = false;
+                if (!ground_.roadSurface().heightAt(x, z, h, 12.0f, ty, td, vis)) ++noTileRoad;
+            }
+            int cat = atJunction(x, z) ? 1 : 0;
+            if (cat == 1) ++junctions;
+            float e = h - plane;
+            float er = h - pr;
+            drawErr.add(e, x, z, cat);
+            if (std::fabs(e) > std::fabs(worst.e)) worst = {e, x, z, cat, (int)s, nRoadW == 4};
+            if (std::fabs(e) > 5.0f) ++errBig5;
+            if (std::fabs(e) > 20.0f) ++errBig20;
+            {
+                drawRoad.add(er, x, z, cat);
+                if (std::fabs(er) > 5.0f) ++asphaltBig5;
+            }
+            graphVsMap.add(ground_.surfaceAt(x, z, h) - h, x, z, cat);
+            float gy = 0;
+            if (r_.groundHeightAt(x, z, gy)) {
+                float gp = h - gy;
+                gap.add(gp, x, z, cat);
+                if (gp < gapMin) { gapMin = gp; gapMinX = x; gapMinZ = z; }
+                if (gp < 0.5f) ++gapSmall;
+                if (gp < 0.0f) ++asphaltBelowGround;
+            }
+            if (haveSite && std::fabs(x - opt_.roadProbeX) < siteR &&
+                std::fabs(z - opt_.roadProbeZ) < siteR)
+                siteList.push_back(Sample{er, x, z, h, pr, 0.0f, cat, (int)s, nRoadW == 4});
+            if (siteList.size() > 256) {
+                std::sort(siteList.begin(), siteList.end(),
+                          [](const Sample& a, const Sample& b) { return std::fabs(a.e) > std::fabs(b.e); });
+                siteList.resize(64);
+            }
+            worstList.push_back(Sample{er, x, z, h, pr, 0.0f, cat, (int)s, nRoadW == 4});
+            if (worstList.size() > 512) {
+                std::sort(worstList.begin(), worstList.end(),
+                          [](const Sample& a, const Sample& b) { return std::fabs(a.e) > std::fabs(b.e); });
+                worstList.resize(128);
+            }
+        }
+    }
+    LOG("road-probe: %zu samples on the road network (%.0f m step, 4 wheel points each), "
+        "%zu skipped (no tile surface within +-%.0f m in the column)",
+        samples, (double)opt_.roadProbeStep, onNone, (double)win);
+    LOG("road-probe: A graph height vs nearest tile surface: mean %+.3f m, median %+.3f m, "
+        "p95 %.3f m, MAX %.3f m at (%.0f, %.0f) cat %s seg %d asphalt4=%d",
+        drawErr.mean(), drawErr.quantile(0.5f), drawErr.quantile(0.95f), drawErr.maxV,
+        worst.x, worst.z, kRoadCat[worst.cat], worst.seg, worst.road ? 1 : 0);
+    LOG("road-probe: A |error| > 5 m: %zu, > 20 m: %zu of %zu; all 4 wheels on asphalt: %zu, "
+        "no asphalt under any wheel: %zu", errBig5, errBig20, samples, onAsphalt, noAsphalt);
+    LOG("road-probe: A graph height vs the ASPHALT under the wheels (falling back to the "
+        "nearest tile surface where the column has no asphalt): mean %+.3f m, median %+.3f m, "
+        "p95 %.3f m, MAX %.3f m, |e|>5 m: %zu",
+        drawRoad.mean(), drawRoad.quantile(0.5f), drawRoad.quantile(0.95f), drawRoad.maxV,
+        asphaltBig5);
+    LOG("road-probe: A junctions %zu of %zu samples", junctions, samples);
+    LOG("road-probe: A ground map surfaceAt() vs graph: mean %+.3f m, median %+.3f m, "
+        "p95 %.3f m, MAX %.3f m", graphVsMap.mean(), graphVsMap.quantile(0.5f),
+        graphVsMap.quantile(0.95f), graphVsMap.maxV);
+    float gmin = 0.0f;
+    for (size_t i = 0; i < gap.bin.size(); ++i)
+        if (gap.bin[i]) { gmin = (float)((double)i * 0.05 - 100.0); break; }
+    LOG("road-probe: B asphalt-to-ground-mesh gap: min %.3f m at (%.0f, %.0f), median %.3f m, "
+        "mean %.3f m; < 0.5 m: %zu; ground above the asphalt: %zu",
+        gmin, gapMinX, gapMinZ, gap.quantile(0.5f), gap.mean(), gapSmall, asphaltBelowGround);
+    {
+        std::sort(worstList.begin(), worstList.end(),
+                  [](const Sample& a, const Sample& b) { return std::fabs(a.e) > std::fabs(b.e); });
+        LOG("road-probe: worst %zu samples over the whole network:", worstList.size());
+        for (size_t i = 0; i < worstList.size() && i < 24; ++i) {
+            const Sample& w = worstList[i];
+            LOG("road-probe:   %+8.3f m at (%9.1f, %9.1f) graph %.2f surface %.2f asphalt4=%d "
+                "cat %s seg %d", w.e, w.x, w.z, w.h, w.s, w.road ? 1 : 0, kRoadCat[w.cat], w.seg);
+        }
+    }
+    if (haveSite) {
+        std::sort(siteList.begin(), siteList.end(),
+                  [](const Sample& a, const Sample& b) { return std::fabs(a.e) > std::fabs(b.e); });
+        LOG("road-probe: site (%.0f, %.0f) +/- %.0f m: %zu samples listed (worst first)",
+            (double)opt_.roadProbeX, (double)opt_.roadProbeZ, (double)siteR, siteList.size());
+        for (size_t i = 0; i < siteList.size() && i < 20; ++i) {
+            const Sample& w = siteList[i];
+            LOG("road-probe:   %+8.3f m at (%9.1f, %9.1f) graph %.2f surface %.2f asphalt=%d "
+                "cat %s seg %d", w.e, w.x, w.z, w.h, w.s, w.road ? 1 : 0,
+                kRoadCat[w.cat], w.seg);
+        }
+    }
+    LOG("road-probe: surface layers on the network: terrain %zu, .way profile %zu, "
+        "tile asphalt %zu of %zu; columns with no tile road triangle: %zu",
+        srcCount[0], srcCount[1], srcCount[2], samples, noTileRoad);
+    // --- the tiles' own asphalt against the layered surface ------------------
+    // Walk every carriageway triangle the tiles contain and ask the layered
+    // surface at three points of it with the triangle's own height as the
+    // reference.  The metric of interest is the point where the `.way` network is
+    // NOT there (it stops short of some driveable tiles - the aa warehouse:
+    // asphalt to z = -4575, network to -4615): the tile layer has to answer, and
+    // with the reference on that surface to within 2 m it has to answer with it.
+    // Where the network is present it owns the height by design, so those points
+    // only report how the two agree.
+    {
+        const std::vector<RoadSurface::Tri>& tri = ground_.roadSurface().triangles();
+        const float off[3][2] = {{0.5f, 0.5f}, {0.25f, 0.5f}, {0.5f, 0.25f}};
+        size_t pts = 0, onNet = 0, offNet = 0, tileAns = 0, tileAnsWrong = 0, offNoLay = 0;
+        size_t multi = 0;
+        ProbeHist closeErr, offErr, netErr;
+        for (const auto& t : tri) {
+            for (int k = 0; k < 3; ++k) {
+                const float u = off[k][0], v = off[k][1];
+                const float x = t.ax + (t.bx - t.ax) * u + (t.cx - t.ax) * v;
+                const float z = t.az + (t.bz - t.az) * u + (t.cz - t.az) * v;
+                const float y = t.ay + (t.by - t.ay) * u + (t.cy - t.ay) * v;
+                ++pts;
+                bool wf = false;
+                float wd = 0.0f;
+                ground_.roadProfileAt(x, z, wf, wd, 32.0f);
+                const bool onNetwork = wf;
+                if (onNetwork) ++onNet; else ++offNet;
+                int src = 0;
+                const float got = ground_.drivableY(x, z, y, &src, nullptr);
+                std::vector<float> all;
+                ground_.roadSurface().surfacesAt(x, z, 12.0f, all);
+                if (all.size() > 1) ++multi;
+                if (!onNetwork) {
+                    if (all.empty()) continue;
+                    ++tileAns;
+                    const float e = got - y;
+                    offErr.add(e, x, z, 0);
+                    if (src != 2) {
+                        if (offNoLay < 6)
+                            LOG("road-probe: C   off-net miss at (%.1f, %.1f): tile %.3f, "
+                                "layered %.3f src %d, surfaces %zu",
+                                x, z, y, got, src, all.size());
+                        ++offNoLay;
+                    }
+                    if (std::fabs(e) > 0.05f) {
+                        if (tileAnsWrong < 6)
+                            LOG("road-probe: C   off-net error %.3f m at (%.1f, %.1f): "
+                                "tile %.3f layered %.3f src %d, surfaces %zu",
+                                e, x, z, y, got, src, all.size());
+                        ++tileAnsWrong;
+                    }
+                } else {
+                    netErr.add(got - y, x, z, 0);
+                }
+                if (all.size() == 1) closeErr.add(got - y, x, z, 0);
+            }
+        }
+        LOG("road-probe: C tile asphalt (%zu triangles, 3 points each): %zu points, "
+            "%zu on the network and %zu off it; %zu multi-surface columns",
+            tri.size(), pts, onNet, offNet, multi);
+        LOG("road-probe: C off-network tile asphalt: %zu points, %zu answered by the tile "
+            "layer, %zu with the wrong surface, %zu >5 cm off; |error| median %.3f m, "
+            "p95 %.3f m, MAX %.3f m at (%.0f, %.0f)",
+            tileAns, tileAns - offNoLay, offNoLay, tileAnsWrong, offErr.quantile(0.5f),
+            offErr.quantile(0.95f), offErr.maxV, offErr.maxX, offErr.maxZ);
+        LOG("road-probe: C single-surface columns only: |layered - tile| median %.3f m, "
+            "p95 %.3f m, MAX %.3f m at (%.0f, %.0f); on-network agreement p95 %.3f m "
+            "(max %.3f m, the two-tier junctions)",
+            closeErr.quantile(0.5f), closeErr.quantile(0.95f), closeErr.maxV,
+            closeErr.maxX, closeErr.maxZ, netErr.quantile(0.95f), netErr.maxV);
+        LOG("road-probe: RESULT3 tilepts=%zu onnet=%zu offnet=%zu tileans=%zu "
+            "offwrong=%zu offnolayer=%zu multi=%zu closep95=%.3f closemax=%.3f "
+            "netp95=%.3f netmax=%.3f",
+            pts, onNet, offNet, tileAns, tileAnsWrong, offNoLay, multi,
+            closeErr.quantile(0.95f), closeErr.maxV, netErr.quantile(0.95f), netErr.maxV);
+    }
+    LOG("road-probe: RESULT2 terrain=%zu way=%zu tile=%zu notile=%zu",
+        srcCount[0], srcCount[1], srcCount[2], noTileRoad);
+    LOG("road-probe: RESULT samples=%zu skipped=%zu asphalt4=%zu noasphalt=%zu maxerr=%.3f "
+        "meanerr=%+.3f p95err=%.3f err5=%zu err20=%zu asphaltmax=%.3f asphalt5=%zu "
+        "mapmax=%.3f gapmin=%.3f gapmedian=%.3f gapsmall=%zu above=%zu junctions=%zu",
+        samples, onNone, onAsphalt, noAsphalt, drawErr.maxV, drawErr.mean(),
+        drawErr.quantile(0.95f), errBig5, errBig20, drawRoad.maxV, asphaltBig5,
+        graphVsMap.maxV, gmin, gap.quantile(0.5f), gapSmall, asphaltBelowGround, junctions);
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// --traffic-wheel-probe SECONDS: the simulated-AI version of the road-probe.
+//
+// The real traffic module is run at 10/25/40/64 cars around a parked player and,
+// on every frame and for every car, the four wheel contact points (from the car
+// body's own length/radius, i.e. exactly the capsule Traffic uses) are compared
+// with the *asphalt* directly under them (a downward ray cast into the shipped
+// B3D triangles).  This is the complaint "the cars fly / sink" measured on the
+// cars themselves: max, mean and p95 of |wheel - asphalt|, the worst site, and
+// how many samples had no asphalt at all under the column.
+// ---------------------------------------------------------------------------
+int App::trafficWheelProbe() {
+    if (!ground_.hasClearance()) { LOG("traffic-wheel-probe: no tile ceiling"); return 4; }
+    ProbeColumn grid;
+    grid.build(worldMeshes_);
+    // junction cells, as in roadProbeReport()
+    std::unordered_map<long long, int> cellSeg;
+    auto cellKey = [](int x, int z) { return ((long long)x << 32) ^ (unsigned)z; };
+    for (size_t s = 0; s < waySegs_.size(); ++s)
+        for (const auto& p : waySegs_[s].pts) {
+            long long k = cellKey((int)std::floor((float)p.x / 50.0f),
+                                  (int)std::floor((float)p.z / 50.0f));
+            auto it = cellSeg.find(k);
+            if (it == cellSeg.end()) cellSeg.emplace(k, (int)s + 1);
+            else if (it->second != (int)s + 1) it->second = 0;
+        }
+    auto atJunction = [&](float x, float z) {
+        auto it = cellSeg.find(cellKey((int)std::floor(x / 50.0f), (int)std::floor(z / 50.0f)));
+        return it != cellSeg.end() && it->second == 0;
+    };
+
+    // Park the player in a lane of a long edge, exactly like --traffic-report.
+    {
+        float lx = 0, lz = 0, lh = 0, lyaw = 0;
+        int ledge = -1;
+        if (!traffic_.nearestLane(vehicle3d_.x(), vehicle3d_.z(), lx, lz, lh, lyaw, ledge, 40.0f) &&
+            !traffic_.nearestLane(vehicle3d_.x(), vehicle3d_.z(), lx, lz, lh, lyaw, ledge))
+            LOG("traffic-wheel-probe: no road near the spawn");
+        else
+            vehicle3d_.reset(lx, lz, lyaw);
+    }
+    // --- phase 1: the player's route, without AI -----------------------------
+    // The truck is put on every layer deliberately: the mapped network (the
+    // spawn), then an off-network carriageway (the road office's driveable tile
+    // stretch) - so the layer statistics are path-independent and reproducible.
+    {
+        const float step1 = 1.0f / 60.0f;
+        const int steps1 = std::max(1, (int)(opt_.trafficWheelProbe / step1));
+        const float starts[2][3] = {{-3020.0f, -4625.0f, 0.0f}, {-3020.0f, -4560.0f, 0.0f}};
+        size_t layerN[3] = {0, 0, 0};
+        size_t layerPlayer = 0;
+        float odo0 = vehicle3d_.odometer();
+        // Drive it without world collisions: this phase measures the ride surface,
+        // not the traffic; a parked car at the warehouse would otherwise stop it
+        // after a metre and the second (unmapped) stretch would never be reached.
+        const Collision* savedCollision = opt_.noCollision ? nullptr : nullptr;
+        (void)savedCollision;
+        vehicle3d_.setCollision(nullptr);
+        for (int k = 0; k < 2; ++k) {
+            vehicle3d_.reset(starts[k][0], starts[k][1], starts[k][2]);
+            for (int i = 0; i < steps1; ++i) {
+                Vehicle::Input in;
+                in.throttle = 1.0f;
+                vehicle3d_.update(in, step1);
+                if ((i % 3) != 0) continue;
+                int src = 0;
+                ground_.drivableY(vehicle3d_.x(), vehicle3d_.z(),
+                                  vehicle3d_.y() - Vehicle::RIDE_HEIGHT, &src, nullptr);
+                if (src < 0) src = 0;
+                if (src > 2) src = 2;
+                ++layerN[src];
+                ++layerPlayer;
+            }
+        }
+        LOG("traffic-wheel-probe: player route (2 starts): %zu frames, layers terrain %zu, "
+            ".way %zu, tile asphalt %zu, %.0f m driven",
+            layerPlayer, layerN[0], layerN[1], layerN[2], vehicle3d_.odometer() - odo0);
+        vehicle3d_.setCollision(&collision_);
+        if (opt_.noCollision) vehicle3d_.setCollision(nullptr);
+        LOG("traffic-wheel-probe: RESULT2 player_terrain=%zu player_way=%zu player_tile=%zu",
+            layerN[0], layerN[1], layerN[2]);
+    }
+
+    const int densities[] = {10, 25, 40, 64};
+    const float step = 1.0f / 60.0f;
+    const int steps = std::max(1, (int)(opt_.trafficWheelProbe / step));
+    ProbeHist all;
+    size_t cars = 0, noAsphalt = 0, junctionSamples = 0, over5 = 0, over20 = 0;
+    size_t srcCount[3] = {0, 0, 0};
+    float worstE = 0, worstX = 0, worstZ = 0;
+    int worstN = 0;
+    bool worstJunction = false;
+    float worstGraph = 0, worstSurf = 0, worstWheelX = 0, worstWheelZ = 0;
+    for (int d = 0; d < 4; ++d) {
+        traffic_.clear();
+        traffic_.setSeed(0x51ED2701u);
+        traffic_.build(waySegs_, wayNodes_);
+        traffic_.spawn(vehicle3d_.x(), vehicle3d_.z(), opt_.trafficRadius, densities[d]);
+        ProbeHist hist;
+        size_t hCars = 0, hNo = 0, hJunction = 0, hOver5 = 0, hOver20 = 0;
+        float hWorst = 0, hWX = 0, hWZ = 0;
+        bool hWJ = false;
+        for (int i = 0; i < steps; ++i) {
+            Traffic::Player p;
+            p.valid = true;
+            p.x = vehicle3d_.x(); p.z = vehicle3d_.z(); p.yaw = vehicle3d_.yaw();
+            p.radius = playerRadius_; p.length = playerLength_;
+            traffic_.setPlayer(p);
+            traffic_.update(step, vehicle3d_.x(), vehicle3d_.z(), opt_.trafficRadius);
+            if ((i % 3) != 0) continue;                 // 20 Hz is plenty for a height
+            for (const auto& c : traffic_.cars()) {
+                const Collision::Body b = traffic_.bodyOf(c.model);
+                float halfTrack = std::max(0.6f, b.radius * 0.8f);
+                float halfBase = std::max(0.6f, b.halfAxis() * 0.8f);
+                const float off[4][2] = {{0.0f, halfBase}, {0.0f, -halfBase},
+                                         {-halfTrack, 0.0f}, {halfTrack, 0.0f}};
+                bool junc = atJunction(c.x, c.z);
+                for (int w = 0; w < 4; ++w) {
+                    float wx = c.x + off[w][0], wz = c.z + off[w][1];
+                    bool isRoad = false;
+                    float sy = 0;
+                    if (!grid.nearest(wx, wz, c.h, 40.0f, true, sy, isRoad)) { ++noAsphalt; ++hNo; continue; }
+                    float e = c.h - sy;
+                    {
+                        int src = 0;
+                        ground_.drivableY(wx, wz, c.h, &src, nullptr);
+                        if (src < 0) src = 0;
+                        if (src > 2) src = 2;
+                        ++srcCount[src];
+                    }
+                    hist.add(e, wx, wz);
+                    all.add(e, wx, wz);
+                    ++hCars; ++cars;
+                    if (junc) { ++junctionSamples; ++hJunction; }
+                    if (std::fabs(e) > 5.0f) { ++over5; ++hOver5; }
+                    if (std::fabs(e) > 20.0f) { ++over20; ++hOver20; }
+                    if (std::fabs(e) > std::fabs(hWorst)) {
+                        hWorst = e; hWX = wx; hWZ = wz; hWJ = junc;
+                        if (std::fabs(e) > std::fabs(worstE)) {
+                            worstE = e; worstX = wx; worstZ = wz; worstJunction = junc;
+                            worstN = densities[d];
+                            worstGraph = c.h; worstSurf = sy; worstWheelX = wx; worstWheelZ = wz;
+                        }
+                    }
+                }
+            }
+        }
+        LOG("traffic-wheel-probe: cars %3d (%ds): %zu wheel samples, no asphalt under %zu, "
+            "|e| mean %+.3f m median %+.3f m p95 %.3f m MAX %.3f m at (%.0f, %.0f)%s; "
+            ">5 m %zu, >20 m %zu, junction samples %zu",
+            densities[d], (int)opt_.trafficWheelProbe, hCars, hNo, hist.mean(),
+            hist.quantile(0.5f), hist.quantile(0.95f), hWorst, hWX, hWZ,
+            hWJ ? " junction" : "", hOver5, hOver20, hJunction);
+    }
+    LOG("traffic-wheel-probe: worst over all densities: %+.3f m at (%.0f, %.0f)%s at %d cars "
+        "(car centre %.0f, %.0f, graph h %.2f, asphalt %.2f)",
+        worstE, worstX, worstZ, worstJunction ? " (junction)" : "", worstN,
+        worstX - worstWheelX, worstZ - worstWheelZ, worstGraph, worstSurf);
+    LOG("traffic-wheel-probe: surface layers under the wheels: terrain %zu, .way %zu, "
+        "tile asphalt %zu", srcCount[0], srcCount[1], srcCount[2]);
+    LOG("traffic-wheel-probe: RESULT samples=%zu noasphalt=%zu mean=%.3f median=%.3f p95=%.3f "
+        "max=%.3f over5=%zu over20=%zu junction=%zu worstx=%.0f worstz=%.0f",
+        cars, noAsphalt, all.mean(), all.quantile(0.5f), all.quantile(0.95f), all.maxV,
+        over5, over20, junctionSamples, worstX, worstZ);
+    return 0;
+}
+
 int App::driveTest() {
     // deterministic headless drive: full throttle, no steering
     const float step = 1.0f / 60.0f;
@@ -3080,6 +4131,28 @@ int App::driveTest() {
     Vehicle::Input in;
     in.throttle = 1.0f;
     float minY = 1e9f, maxY = -1e9f;
+    // The player's wheel contact plane against the asphalt under it: the same
+    // measurement as --traffic-wheel-probe, on the driven truck.  The four
+    // contact points come from Vehicle's own wheelbase/track, so this is exactly
+    // the plane the model's wheels stand on.
+    ProbeColumn pgrid;
+    pgrid.build(worldMeshes_);
+    ProbeHist *playerHist = nullptr, *playerOnRoad = nullptr;
+    ProbeHist hAll, hOnRoad;
+    playerHist = &hAll; playerOnRoad = &hOnRoad;
+    size_t playerSamples = 0, playerNoAsphalt = 0;
+    float playerWorst = 0, playerWorstX = 0, playerWorstZ = 0;
+    bool playerWorstRoad = false;
+    // Which layer the ride is on: 0 = terrain fallback, 1 = `.way` profile,
+    // 2 = the tiles' own asphalt (src/world/RoadSurface.cpp).
+    size_t rideSrc[3] = {0, 0, 0};
+    float rideSrcMax[3] = {0, 0, 0};
+    float pitchMax = 0, rollMax = 0;
+    // Vertical continuity of the ride: the road profile the truck now follows is
+    // quantised to the ground map's 12-unit cells, so a step at a cell border
+    // would show up here as a per-frame pop (the AI's own limit is 0.5 m).
+    float prevY = vehicle3d_.y(), maxStep = 0.0f;
+    float prevX = vehicle3d_.x(), prevZ = vehicle3d_.z();
     if (audio_.ready()) audio_.engineStart();
     for (int i = 0; i < steps; ++i) {
         vehicle3d_.update(in, step);
@@ -3104,6 +4177,68 @@ int App::driveTest() {
         updateSceneAudio();          // engine loop + crash one-shots, same calls
         minY = std::min(minY, vehicle3d_.y());
         maxY = std::max(maxY, vehicle3d_.y());
+        {
+            float dy = std::fabs(vehicle3d_.y() - prevY);
+            if (dy > 0.5f && getenv("HT2_RIDE_DEBUG")) {
+                bool fA = false, fB = false;
+                float yA = ground_.roadProfileAt(prevX, prevZ, fA);
+                float yB = ground_.roadProfileAt(vehicle3d_.x(), vehicle3d_.z(), fB);
+                LOG("ride-debug: t=%.2f step %.3f m at (%.1f, %.1f) prev (%.1f, %.1f) "
+                    "profile prev %.2f(%d) now %.2f(%d)",
+                    (i + 1) * step, dy, vehicle3d_.x(), vehicle3d_.z(), prevX, prevZ,
+                    yA, fA ? 1 : 0, yB, fB ? 1 : 0);
+            }
+            maxStep = std::max(maxStep, dy);
+            prevY = vehicle3d_.y();
+            prevX = vehicle3d_.x();
+            prevZ = vehicle3d_.z();
+            pitchMax = std::max(pitchMax, std::fabs(vehicle3d_.pitch()));
+            rollMax = std::max(rollMax, std::fabs(vehicle3d_.roll()));
+
+            {
+                int src = 0;
+                ground_.drivableY(vehicle3d_.x(), vehicle3d_.z(), prevY - Vehicle::RIDE_HEIGHT,
+                                  &src, nullptr);
+                if (src < 0) src = 0;
+                if (src > 2) src = 2;
+                ++rideSrc[src];
+            }
+        }
+        {
+            float fx2 = 0, fz2 = 0;
+            vehicle3d_.forward(fx2, fz2);
+            const float lx2 = -fz2, lz2 = fx2;
+            const float hb = Vehicle::WHEELBASE * 0.5f, ht = Vehicle::TRACK * 0.5f;
+            const float wp[4][2] = {{vehicle3d_.x() + fx2 * hb, vehicle3d_.z() + fz2 * hb},
+                                    {vehicle3d_.x() - fx2 * hb, vehicle3d_.z() - fz2 * hb},
+                                    {vehicle3d_.x() + lx2 * ht, vehicle3d_.z() + lz2 * ht},
+                                    {vehicle3d_.x() - lx2 * ht, vehicle3d_.z() - lz2 * ht}};
+            const float plane = vehicle3d_.y() - Vehicle::RIDE_HEIGHT;
+            for (int w = 0; w < 4; ++w) {
+                bool isRoad = false;
+                float sy = 0;
+                if (!pgrid.nearest(wp[w][0], wp[w][1], plane, 40.0f, true, sy, isRoad)) {
+                    ++playerNoAsphalt;
+                    continue;
+                }
+                (void)isRoad;
+                float e = plane - sy;
+                playerHist->add(e, wp[w][0], wp[w][1]);
+                if (isRoad) playerOnRoad->add(e, wp[w][0], wp[w][1]);
+                {
+                    int src = 0;
+                    ground_.drivableY(wp[w][0], wp[w][1], plane, &src, nullptr);
+                    if (src < 0) src = 0;
+                    if (src > 2) src = 2;
+                    rideSrcMax[src] = std::max(rideSrcMax[src], std::fabs(e));
+                }
+                ++playerSamples;
+                if (std::fabs(e) > std::fabs(playerWorst)) {
+                    playerWorst = e; playerWorstX = wp[w][0]; playerWorstZ = wp[w][1];
+                    playerWorstRoad = isRoad;
+                }
+            }
+        }
         if ((i % 60) == 0 || i == steps - 1)
             LOG("drive: t=%5.1fs pos=(%8.1f,%8.1f,%8.1f) yaw=%6.1f speed=%6.1f km/h odo=%7.1f m",
                 (i + 1) * step, vehicle3d_.x(), vehicle3d_.y(), vehicle3d_.z(),
@@ -3111,6 +4246,27 @@ int App::driveTest() {
     }
     LOG("drive: done, %d steps, odometer %.1f m, height range %.1f..%.1f",
         steps, vehicle3d_.odometer(), minY, maxY);
+    LOG("drive: player wheel plane vs asphalt: %zu samples, no asphalt under %zu, "
+        "mean %+.3f m, median %+.3f m, p95 %.3f m, MAX %+.3f m at (%.0f, %.0f)%s; on-asphalt %zu: "
+        "mean %+.3f m, p95 %.3f m, MAX %.3f m",
+        playerSamples, playerNoAsphalt, playerHist->mean(), playerHist->quantile(0.5f),
+        playerHist->quantile(0.95f), playerWorst, playerWorstX, playerWorstZ,
+        playerWorstRoad ? "" : " (no asphalt)", playerOnRoad->n, playerOnRoad->mean(),
+        playerOnRoad->quantile(0.95f), playerOnRoad->maxV);
+    LOG("drive: RESULT playerwheel_samples=%zu noasphalt=%zu mean=%+.3f p95=%.3f max=%.3f "
+        "onroad_n=%zu onroad_mean=%+.3f onroad_p95=%.3f onroad_max=%.3f maxstep=%.3f",
+        playerSamples, playerNoAsphalt, playerHist->mean(), playerHist->quantile(0.95f),
+        playerWorst, playerOnRoad->n, playerOnRoad->mean(), playerOnRoad->quantile(0.95f),
+        playerOnRoad->maxV, maxStep);
+    LOG("drive: player vertical step per frame: max %.3f m (the AI's road-profile limit "
+        "is 0.50 m); pitch max %.2f deg, roll max %.2f deg", maxStep, pitchMax, rollMax);
+    LOG("drive: ride surface: terrain fallback %zu frames, .way profile %zu, tile asphalt %zu; "
+        "max |wheel - asphalt| per layer: terrain %.3f m, .way %.3f m, tile %.3f m",
+        rideSrc[0], rideSrc[1], rideSrc[2], rideSrcMax[0], rideSrcMax[1], rideSrcMax[2]);
+    LOG("drive: RESULT2 ride_terrain=%zu ride_way=%zu ride_tile=%zu layer_max=%.3f/%.3f/%.3f "
+        "pitch=%.2f roll=%.2f",
+        rideSrc[0], rideSrc[1], rideSrc[2], rideSrcMax[0], rideSrcMax[1], rideSrcMax[2],
+        pitchMax, rollMax);
     if (audio_.ready())
         LOG("audio: engine loop after drive: %zu frames, %zu starts, pitch %.2f, gain %.2f",
             audio_.engineLoopFrames(), audio_.engineRestarts(),

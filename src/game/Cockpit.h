@@ -50,7 +50,7 @@ public:
     // Returns false when no cockpit is loaded (the caller keeps its own pose).
     bool eyePose(float& x, float& y, float& z, float& pitchDeg) const;
 
-    // Draws the static cluster and the animated needles.  `vehicleModel` is
+    // Draws the cabin and the animated needles.  `vehicleModel` is
     // Vehicle::modelMatrix(); the camera arguments match Renderer::beginTraffic.
     void draw(Renderer& r, const Mat4& vehicleModel, const Vehicle& v,
               float camX, float camY, float camZ, float camYawDeg, float camPitchDeg);

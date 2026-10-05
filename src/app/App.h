@@ -10,10 +10,12 @@
 #include "../world/Way.h"
 #include "../world/B3D.h"
 #include "../world/SceneTextures.h"
+#include "../world/Overlay.h"
 #include "../game/Vehicle.h"
 #include "../world/GroundMap.h"
 #include "../world/Weather.h"
 #include "../script/GameData.h"
+#include "../script/ScriptRules.h"
 #include "../game/Economy.h"
 #include "../game/Traffic.h"
 #include "../game/Collision.h"
@@ -24,6 +26,7 @@
 #include "../ui/Hud.h"
 #include "../ui/Map.h"
 #include <map>
+#include <memory>
 #include <set>
 
 namespace ht2 {
@@ -44,6 +47,11 @@ struct Options {
     bool worldB3d = false;        // draw ENV/aa.b3d geometry in the world state
     std::string msg;              // debug: show this status line on the menu
     std::string vehicle = "ZilR"; // vehicle model container in COMMON/TRUCKS.B3D
+    // --overlay FILE: the map/vehicle editor's output (tools/editor,
+    // src/world/Overlay.cpp, docs/editor.md).  The shipped data is never
+    // modified; the overlay carries absolute node positions, segment
+    // attr/width, part visibility/material and anchor transforms.
+    std::string overlay;
     bool allTiles = true;         // merge every ENV tile into the world
     bool scripts = false;        // --scripts: decrypt+parse every script, print a report
     bool scriptReport = false;   // --script-report: the recovered rule coverage
@@ -56,19 +64,30 @@ struct Options {
     bool noGround = false;       // --no-ground: skip the generated ground/terrain mesh
     bool probe = false;          // --probe x,z[,r]: list world submeshes near a point
     float probeX = 0, probeZ = 0, probeR = 120.0f;
+    bool roadProbe = false;      // --road-probe: vertical error of the traffic over
+                                 // the road graph + the asphalt/ground gap
+    float roadProbeStep = 8.0f;  // sampling step along the road network (metres)
+    bool roadProbeSite = false;  // --road-probe-site x,z[,r]: dump the worst samples
+    bool rideProbe = false;      // --ride-probe x,z: dump every surface layer there
+    float trafficWheelProbe = 0.0f;   // --traffic-wheel-probe [SEC]: wheel error of the
+                                      // simulated AI at several densities
+    float roadProbeX = 0, roadProbeZ = 0, roadProbeR = 200.0f;
     bool noCull = false;         // debug: disable backface culling
     bool drawTerrain = false;     // M0 terrain mesh (its heights do not match the tiles)
     std::string onlyTile;         // when set, load just this ENV tile (debug)
     float drive = 0.0f;           // headless drive test: seconds of full throttle
     float warmup = 0.0f;          // fast-forward the vehicle N seconds before drawing
     bool autostart = false;
-    std::string view = "chase";   // --view chase|cockpit|bonnet
+    std::string view = "cockpit";   // --view chase|cockpit|bonnet
     int traffic = 16;              // --traffic N: number of AI cars (0 = none)
     int trafficModels = 5;         // --traffic-models N: distinct AI models
     float trafficRadius = 900.0f;
     float trafficReport = 0.0f;    // --traffic-report SECONDS: headless AI report
     bool trafficReportOncoming = false;  // ... park the player against the flow
-    float eventRadius = 250.0f;
+    // Approximation of king.exe's road PositionId transition.  The original
+    // has no broad proximity trigger; 20 world units only associates the free
+    // driving pose with the named .way node being crossed.
+    float eventRadius = (float)ScriptRules::kNodePassRadius;
     bool collisionProbe = false;   // --collision-probe x,z[,r]
     bool obstaclesOpen = false;    // --obstacles open: hide road-closure geometry
     bool fullscreen = false;       // --fullscreen (handhelds)
@@ -107,6 +126,7 @@ struct Options {
     std::string escScreen;         // --esc-screen NAME (main|exit|sound|control|save|load)
     std::string escShot;           // --esc-shot FILE: render one ESC frame and exit
     std::string escAct;            // --esc-act NAME[,NAME...]: scripted activations
+    std::string uiKey;             // --ui-key Esc|F1..F5: normal world key path
     // --- weather and draw distance (src/world/Weather.cpp, docs/weather.md) --
     std::string weather;          // --weather NAME: clear|rain|snow|bad|N (preset)
     int weatherSet = 1;           // --weather-set N: WEATHERn preset 1..8
@@ -161,11 +181,12 @@ private:
     // named .way nodes referenced by the mod_*.sch `parking` forms.
     void spawnParkedVehicles();
     void indexWayNodes();
-    // --- node events: messages fired when driving past a named .way node ----
+    // --- script runtime / node events recovered from king.exe ---------------
     void prepareNodeEvents();
     void updateNodeEvents(float dt);
-    struct EventState { float x = 0, z = 0; bool armed = true; bool has = false; };
-    std::vector<EventState> events_;
+    std::unique_ptr<ScriptRuntime> scriptRuntime_;
+    double scriptTime_ = 0.0;
+    std::string currentRegion_;
     float msgTimer_ = 0.0f;
     std::string msgText_;
     float msgAge_ = 0.0f;          // seconds since the pager text appeared
@@ -248,7 +269,7 @@ private:
         float x = 0, z = 0, y = 0;    // y = the road height of the way node
         std::string klass;
         int cars = 1;
-        float radius = 120.0f;
+        size_t scriptIndex = 0;
         bool fired = false;
     };
     std::vector<AmbushState> ambushes_;
@@ -270,6 +291,8 @@ private:
     bool escSwallowMenu_ = false;
     void escAction(const std::string& act);   // terminal action -> world state
     void runEscScript(const std::string& list);   // --esc-act NAME[,NAME...]
+    bool handleWorldPanelKey(int key);
+    void syncEscContext();          // current world/economy values -> open panel
     void leaveWorldToMenu();      // ESC main "ГЛАВНОЕ МЕНЮ" / exit popup
     void applyEscSliders();       // push the sound sliders into Audio
     // --- the small save game (a text file under the SDL user data dir) -----
@@ -304,6 +327,9 @@ private:
     int nearestService(bool wantFuel) const;
     bool refuel(long* paidOut);
     bool repair(long* paidOut);
+    long refuelPrice() const;
+    long repairPrice() const;
+    std::string hiredDriver_;       // the driver selected through BackJob
     std::vector<float> trafficYOff_;   // ground offset per AI model
     // Renderer batches of the intact and the dented skin, one entry per AI model
     // (equal when the container has no damaged material at all).
@@ -323,9 +349,25 @@ private:
     void applyTrafficHits(float dt);
     // --traffic-report SECONDS: run the AI headlessly and print the statistics.
     int trafficReport();
+    // --road-probe: measure, over the whole road network, the vertical error
+    // between what a traffic vehicle is drawn at (the graph height `Car::h`,
+    // exactly as drawTraffic()/Traffic computes it) and the real road surface
+    // under each wheel, plus the vertical gap between that surface and the
+    // generated ground mesh (the z-fighting / "road shakes" metric).
+    int roadProbeReport();
+    // --ride-probe x,z: dump every drivable-surface layer at one site.
+    int rideProbeReport();
+    // --traffic-wheel-probe SECONDS: run the real AI at several densities and
+    // report the vertical error between each car's wheel contact points and the
+    // asphalt under them (max / median / p95, and the worst site).
+    int trafficWheelProbe();
+    void collectWaySegments();          // every .way of every world tile -> waySegs_
 
     std::map<std::string, Way::Node> wayNodes_;   // every named node of every tile
     std::vector<Way::Seg> waySegs_;               // every road segment (for headings)
+    // --overlay: read once in loadData(), applied to every tile's .way in
+    // collectWaySegments()/indexWayNodes() and to the player vehicle.
+    Overlay overlay_;
     SceneTextures menuTex_, worldTex_, vehicleTex_;
     Vehicle vehicle3d_;
     Cockpit cockpit_;           // 3D instruments from COMMON/CABINES.B3D
@@ -358,7 +400,7 @@ private:
     void drawWorld(float dt, bool interactive);
     // camera pose for the current view mode; returns eye position and yaw/pitch
     void viewPose(float& ex, float& ey, float& ez, float& yaw, float& pitch, bool& drawTruck);
-    int viewMode_ = 0;           // 0 chase, 1 cockpit, 2 bonnet
+    int viewMode_ = 1;           // 0 chase, 1 cockpit, 2 bonnet
     int driveTest();
 };
 

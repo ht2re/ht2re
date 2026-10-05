@@ -146,10 +146,10 @@ void Traffic::clear() {
 // the junction logic actually converge on a winding road network. Fields are
 // cached (LRU) and computed lazily under a per-update budget so a spawn burst
 // never stalls a frame.
-const Traffic::RouteField* Traffic::routeField(int dest) {
+const Traffic::RouteField* Traffic::routeField(int dest, bool freight) {
     if (dest < 0 || dest >= (int)verts_.size()) return nullptr;
     for (RouteField& f : routes_)
-        if (f.dest == dest) { f.stamp = ++routeStamp_; return &f; }
+        if (f.dest == dest && f.freight == freight) { f.stamp = ++routeStamp_; return &f; }
     if (routeBudget_ <= 0) return nullptr;
     --routeBudget_;
     RouteField* slot = nullptr;
@@ -157,12 +157,13 @@ const Traffic::RouteField* Traffic::routeField(int dest) {
     else {
         for (RouteField& f : routes_) if (!slot || f.stamp < slot->stamp) slot = &f;
     }
-    computeRoute(dest, *slot);
+    computeRoute(dest, *slot, freight);
     slot->stamp = ++routeStamp_;
     return slot;
 }
 
-void Traffic::computeRoute(int dest, RouteField& f) {
+void Traffic::computeRoute(int dest, RouteField& f, bool freight) {
+    f.freight = freight;
     const int n = (int)verts_.size();
     const float kInf = std::numeric_limits<float>::max();
     f.dest = dest;
@@ -179,6 +180,7 @@ void Traffic::computeRoute(int dest, RouteField& f) {
         if (top.first > f.dist[v] + 1e-4f) continue;
         for (int ei : verts_[v].edges) {
             const Edge& e = edges_[ei];
+            if (!freight && (e.attr & 0x30) == 0x30) continue;
             const int o = (e.a == v) ? e.b : e.a;
             const float nd = top.first + e.len;
             if (nd < f.dist[o] - 1e-4f) {          // strict: deterministic ties
@@ -377,7 +379,7 @@ float Traffic::distanceToLane(int e, int dir, float x, float z) const {
         const float l = std::sqrt(dx * dx + dz * dz);
         if (l < 1e-6f) continue;
         dx /= l; dz /= l;
-        const float rx = -dz * lane, rz = dx * lane;      // right of travel
+        const float rx = dz * lane, rz = -dx * lane;      // right in the mirrored D3D world
         ax += rx; az += rz; bx += rx; bz += rz;
         best = std::min(best, pointSeg2(x, z, ax, az, bx, bz));
     }
@@ -403,7 +405,7 @@ bool Traffic::nearestLane(float x, float z, float& outX, float& outZ, float& out
                 const float l = std::sqrt(dx * dx + dz * dz);
                 if (l < 1e-6f) continue;
                 dx /= l; dz /= l;
-                const float rx = -dz * lane, rz = dx * lane;
+                const float rx = dz * lane, rz = -dx * lane;
                 ax += rx; az += rz; cx += rx; cz += rz;
                 const float d2 = pointSeg2(x, z, ax, az, cx, cz);
                 if (d2 < bestD) {
@@ -545,14 +547,16 @@ void Traffic::refreshPose(Car& c) {
     }
     c.yaw = head;
     c.h = h;
-    // Right-hand traffic: right = forward x up = (-fz, fx) in the XZ plane.  The
-    // offset direction follows the *blended* heading, so the car sweeps a
-    // rounded corner instead of stepping sideways at the vertex.
+    // The renderer mirrors projection X to preserve the original D3D world;
+    // its right-of-travel vector is (fz, -fx), not the unmirrored GL normal.
+    // Keep the lane's perpendicular distance when rotating its normal through
+    // a bend: without the miter correction the car cuts towards the centreline.
     c.lane = laneFor(e);
     const float hr = head * kPi / 180.0f;
-    const float off = c.lane + c.shift;
-    c.x += -std::cos(hr) * off;
-    c.z += std::sin(hr) * off;
+    const float alignment = std::max(0.5f, std::cos(shortAngle(head - raw) * kPi / 180.0f));
+    const float off = c.lane / alignment + c.shift;
+    c.x += std::cos(hr) * off;
+    c.z -= std::sin(hr) * off;
 }
 
 // ---------------------------------------------------------------------------
@@ -582,6 +586,24 @@ int Traffic::pickResolvedVertex(float fromX, float fromZ, float minDist) {
 }
 
 void Traffic::newDestination(Car& c, float x, float z) {
+    const auto role = freightModels_.find(c.model);
+    if (role != freightModels_.end() && !role->second) {
+        // Ambient trips target public-road vertices rather than warehouse RNODs.
+        c.destVertex = -1;
+        c.dest.clear();
+        for (int attempt = 0; attempt < 64; ++attempt) {
+            const int edge = nextInt((int)edges_.size());
+            if (!canUseEdge(c.model, edge)) continue;
+            const int v = edges_[edge].b;
+            const float d = dist2(x, z, verts_[v].x, verts_[v].z);
+            if (d < kMinDestDist * kMinDestDist ||
+                (activeRadius_ > 0 && d > activeRadius_ * activeRadius_)) continue;
+            c.destVertex = v;
+            break;
+        }
+        c.destTimer = 0.0f;
+        return;
+    }
     c.destVertex = pickResolvedVertex(x, z, kMinDestDist);
     c.dest.clear();
     if (c.destVertex >= 0) {
@@ -685,6 +707,7 @@ bool Traffic::relocate(Car& c, float px, float pz, float radius) {
     int fdir = 1;
     for (int t = 0; t < kRelocateTries; ++t) {
         const int ei = nextInt((int)edges_.size());
+        if (!canUseEdge(c.model, ei)) continue;
         const float d = distanceToEdge(ei, px, pz);
         if (d * d > r2) continue;
         const Edge& e = edges_[ei];
@@ -722,6 +745,7 @@ bool Traffic::relocate(Car& c, float px, float pz, float radius) {
     int best = -1;
     float bd = std::numeric_limits<float>::max();
     for (int i = 0; i < (int)edges_.size(); ++i) {
+        if (!canUseEdge(c.model, i)) continue;
         const float d = distanceToEdge(i, px, pz);
         if (d < bd) { bd = d; best = i; }
     }
@@ -754,12 +778,21 @@ void Traffic::spawn(float px, float pz, float radius, int count) {
         c.cruise = 11.0f + 6.0f * nextFloat();       // 11 .. 17 m/s
         c.speed = c.cruise * (0.6f + 0.4f * nextFloat());
         int placed = -1;
-        for (int attempt = 0; attempt < 8 && placed < 0; ++attempt) {
+        for (int attempt = 0; attempt < 64 && placed < 0; ++attempt) {
             const int ei = near[nextInt((int)near.size())];
+            if (!canUseEdge(c.model, ei)) continue;
             const int dir = ((k + attempt) & 1) ? 1 : -1;
             const float s = (0.1f + 0.8f * nextFloat()) * edges_[ei].len;
             if (occupied(ei, dir, s, kSpawnGap)) continue;   // keep spawn gaps honest
             placeOn(c, ei, dir, s);
+            bool overlaps = false;
+            for (const Car& other : cars_) {
+                float nx = 0, nz = 0;
+                if (Collision::bodyOverlap(c.x, c.z, c.yaw, bodyOf(c.model),
+                                           other.x, other.z, other.yaw, bodyOf(other.model),
+                                           nx, nz) > 0.0f) { overlaps = true; break; }
+            }
+            if (overlaps) continue;
             placed = ei;
         }
         if (placed < 0) continue;
@@ -825,7 +858,9 @@ int Traffic::chooseNext(const Car& c, int v, int& outDir, float& outTurn, int av
         : std::numeric_limits<float>::max();
     int routed = -1;                                   // shortest-path next hop
     if (pathfinding_ && c.destVertex >= 0) {
-        const RouteField* rf = routeField(c.destVertex);
+        const auto role = freightModels_.find(c.model);
+        const bool freight = role == freightModels_.end() || role->second;
+        const RouteField* rf = routeField(c.destVertex, freight);
         if (rf && v < (int)rf->next.size()) routed = rf->next[v];
     }
 
@@ -839,6 +874,7 @@ int Traffic::chooseNext(const Car& c, int v, int& outDir, float& outTurn, int av
         sample(c.edge, c.dir, e.len, ix, ih, iz, ifx, ifz);
     }
     for (int j : verts_[v].edges) {
+        if (!canUseEdge(c.model, j)) continue;
         if (j == c.edge) continue;                      // never reverse on the same edge
         if (j == avoid) continue;
         const Edge& ne = edges_[j];
@@ -874,6 +910,15 @@ int Traffic::chooseNext(const Car& c, int v, int& outDir, float& outTurn, int av
     return pick;
 }
 
+bool Traffic::canUseEdge(int model, int edge) const {
+    if (edge < 0 || edge >= (int)edges_.size()) return false;
+    const auto role = freightModels_.find(model);
+    if (role == freightModels_.end() || role->second) return true;
+    // Shipped loading-yard/market access segments use the 0x30 road family:
+    // 49/50, 53/54 and 57/58 (bit zero selects the segment constructor).
+    return (edges_[edge].attr & 0x30) != 0x30;
+}
+
 void Traffic::planTurn(Car& c) {
     c.nextEdge = -1;
     c.nextDir = 0;
@@ -899,7 +944,13 @@ bool Traffic::advanceJunction(Car& c, float px, float pz, float radius) {
 
     int pickDir = 1;
     float turn = 0.0f;
-    int pick = chooseNext(c, v, pickDir, turn);
+    // The rounded lane pose already follows nextEdge. Preserve that turn even
+    // when a shortest-path field becomes available during the approach.
+    int pick = c.nextEdge;
+    if (pick >= 0 && canUseEdge(c.model, pick)) {
+        pickDir = c.nextDir;
+        turn = c.turn;
+    } else pick = chooseNext(c, v, pickDir, turn);
     if (pick < 0) {
         // A genuine dead end: no legal continuation exists.  Beyond the player's
         // view the car simply turns around (counted separately, never as a
@@ -931,20 +982,10 @@ bool Traffic::advanceJunction(Car& c, float px, float pz, float radius) {
     }
     const float entry = over < 0.0f ? 0.0f : over;
     if (entryBlocked(pick, pickDir, entry, &c)) {       // wait at the junction line
-        // Re-plan towards the best *free* alternative so the lane blend does not
-        // keep aiming at an edge the car cannot enter.
-        int altDir = 1;
-        float altTurn = 0.0f;
-        const int alt = chooseNext(c, v, altDir, altTurn, pick);
-        if (alt >= 0 && !entryBlocked(alt, altDir, entry, &c)) {
-            pick = alt; pickDir = altDir; turn = altTurn;
-        } else {
-            c.s = e.len;
-            c.speed = 0.0f;
-            c.yielding = true;                          // queueing != being stuck
-            if (c.nextEdge == pick || c.nextEdge < 0) planTurn(c);
-            return false;
-        }
+        c.s = e.len;
+        c.speed = 0.0f;
+        c.yielding = true;
+        return false;
     }
     c.prevEdge = c.edge;
     c.prevDir = c.dir;
@@ -968,7 +1009,7 @@ float Traffic::playerLeaderCap(const Car& c, float& fx, float& fz) const {
     const float dx = player_.x - c.x, dz = player_.z - c.z;
     const float along = dx * fx + dz * fz;
     if (along <= 0.0f || along > kPlayerLook) return 1e9f;
-    const float rx = -fz, rz = fx;
+    const float rx = fz, rz = -fx;
     const float lat = dx * rx + dz * rz;
     const Body cb = bodyOf(c.model);
     if (std::fabs(lat) > cb.radius + player_.radius + 0.6f) return 1e9f;
@@ -1046,7 +1087,8 @@ void Traffic::resolveContacts() {
                 if (C.edge < 0 || C.edge >= (int)edges_.size()) continue;
                 float cx, ch, cz, cfx, cfz;
                 sample(C.edge, C.dir, C.s, cx, ch, cz, cfx, cfz);
-                const float rx = -cfz, rz = cfx;
+                const float ca = C.yaw * kPi / 180.0f;
+                const float rx = std::cos(ca), rz = -std::sin(ca);
                 // The separation moves the body along its own path; when the
                 // contact normal is at a shallow angle to the path (two roads
                 // that the data draws nearly on top of each other) the move is
@@ -1114,7 +1156,8 @@ void Traffic::resolveContacts() {
         if (A.edge >= 0 && A.edge < (int)edges_.size()) {
             float cx, ch, cz, cfx, cfz;
             sample(A.edge, A.dir, A.s, cx, ch, cz, cfx, cfz);
-            const float rx = -cfz, rz = cfx;
+            const float ca = A.yaw * kPi / 180.0f;
+            const float rx = std::cos(ca), rz = -std::sin(ca);
             const float push = std::min(kMaxSepStep, overlap * 0.5f + kContactSlack);
             A.s -= (nx * cfx + nz * cfz) * push;
             if (A.s < 0.0f) A.s = 0.0f;

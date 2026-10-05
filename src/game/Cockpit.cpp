@@ -359,6 +359,38 @@ bool Cockpit::load(Renderer& r, const std::string& dataDir, const std::string& v
             panels.push_back(twoSided(cab_.submeshes()[(size_t)best]));
         }
     }
+    // Retain the authored cabin, including the steering wheel, doors and roof.
+    // Glass is a separate overlay in the original viewer; its opaque texture
+    // must not close the windscreen in this geometry pass.
+    for (size_t i = 0; i < cab_.submeshes().size(); ++i) {
+        if (used[i] || panelUsed[i]) continue;
+        const auto& sm = cab_.submeshes()[i];
+        if (lower(sm.name).find("glass") != std::string::npos ||
+            lower(sm.material).find("glass") != std::string::npos) continue;
+        B3D::SubMesh part = sm;
+        if (startsWith(lower(sm.name), "rule")) {
+            B3D::Anchor wheel;
+            if (cab_.anchorOf(brand_ + "RuleSpace", wheel)) {
+                // Subtag-4 self anchors are deliberately ignored by the scene
+                // walker for animated parts. Mount the wheel at its authored pivot.
+                for (size_t v = 0; v + 2 < part.pos.size(); v += 3) {
+                    const float p[3] = {part.pos[v], part.pos[v + 1], part.pos[v + 2]};
+                    for (int axis = 0; axis < 3; ++axis)
+                        part.pos[v + axis] = wheel.t[axis] + wheel.m[axis * 3] * p[0]
+                                          + wheel.m[axis * 3 + 1] * p[1]
+                                          + wheel.m[axis * 3 + 2] * p[2];
+                }
+                for (size_t v = 0; v + 2 < part.nrm.size(); v += 3) {
+                    const float p[3] = {part.nrm[v], part.nrm[v + 1], part.nrm[v + 2]};
+                    for (int axis = 0; axis < 3; ++axis)
+                        part.nrm[v + axis] = wheel.m[axis * 3] * p[0]
+                                          + wheel.m[axis * 3 + 1] * p[1]
+                                          + wheel.m[axis * 3 + 2] * p[2];
+                }
+            }
+        }
+        panels.push_back(twoSided(part));
+    }
     if (!panels.empty()) {
         panelBatch_ = r.addTrafficModel(panels, &tex_);
         for (const auto& p : panels) panelTris_ += p.idx.size() / 3;

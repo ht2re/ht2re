@@ -115,6 +115,7 @@ public:
     // maps that index to its own render batches / body sizes (the app uploads an
     // intact and a dented batch per model).
     void setModels(const std::vector<int>& ids);
+    void setFreightModel(int model, bool freight) { freightModels_[model] = freight; }
     // Spawn `count` cars on the road network within `radius` of (px,pz).
     void spawn(float px, float pz, float radius, int count);
     // Advance and keep the population around the player.
@@ -205,6 +206,8 @@ public:
     }
 
 private:
+    std::map<int, bool> freightModels_;
+    bool canUseEdge(int model, int edge) const;
     struct PolyPt { float x = 0, h = 0, z = 0, d = 0; };   // d = arclength from edge start
     struct Vertex { float x = 0, h = 0, z = 0; std::vector<int> edges; };
     // Reverse-Dijkstra field of one destination vertex: `next[v]` is the edge a
@@ -212,6 +215,7 @@ private:
     // the fallback whenever no field is ready yet).
     struct RouteField {
         int dest = -1;
+        bool freight = true;
         uint32_t stamp = 0;
         std::vector<float> dist;
         std::vector<int> next;
@@ -242,8 +246,8 @@ private:
     // True while another car is inside the junction exclusion zone of vertex v.
     bool vertexBusy(int v, const Car* self, float zone) const;
     // Cached route field for `dest` (nullptr while the per-update budget is spent).
-    const RouteField* routeField(int dest);
-    void computeRoute(int dest, RouteField& f);
+    const RouteField* routeField(int dest, bool freight);
+    void computeRoute(int dest, RouteField& f, bool freight);
     void sample(int edge, int dir, float s, float& x, float& h, float& z,
                 float& fx, float& fz) const;
     // Heading (degrees) of an edge when travelled in `dir`, at arclength `s`.

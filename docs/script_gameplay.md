@@ -18,7 +18,10 @@ Tooling added for this document (all under `tools/`, nothing pre-existing was mo
 
 | tool | purpose |
 |------|---------|
-| `tools/sexp.py` | tiny s-expression reader for the `.sch`/`.CNF` files (SDTE + cp1251 aware) |
+| `tools/sexp.py` | s-expression reader/writer for `.sch`/`.CNF` (SDTE + cp1251 aware, escapes, canonical output) |
+| `tools/sch2lua.py` | transpiles all 46 scripts to Lua tables and drives the round trip back to `.sch` |
+| `tools/lua_sexp.lua` | the Lua side: loads the generated tables and re-serialises the canonical s-expression |
+| `tools/sch2lua_check.sh` | the whole pipeline check: reader invariants, round trip, `dofile`, SDTE re-encrypt |
 | `tools/script_survey.py` | inventory of every form head; `--head` / `--tree` dumps |
 | `tools/verify_nodes.py` | resolves every node name in every `mod_*.sch` against `<tile>.way` and checks it against the `<tile>.b3d` bounding box |
 | `tools/gen_head_table.py` | generates the complete head table in Appendix A |
@@ -81,22 +84,27 @@ Tooling added for this document (all under `tools/`, nothing pre-existing was mo
   ```
 
   A reader must accept `.` and expose it as a normal atom (or skip it).
-* **Escapes — important, the current C++ reader gets this wrong.**
-  `\` escapes the next character inside a string. Two files rely on it:
+* **Escapes.** `\` escapes the next character inside a string. Two files rely on it:
   * `merchandise.sch` — `"Телевизор 14\""` (2 occurrences; the closing quote is escaped).
   * `Ms.sch` — `"...ПРИ ДВИЖЕНИИ\n   ЗАДНИМ ХОДОМ"` (6 occurrences; `\n` = line break).
 
-  `src/script/Sexp.cpp` stops a string at the first `"` (line ~76), which makes those two
-  `merchandise.sch` items swallow the *next* item: a naive parse yields **106** cargo items
-  instead of **107**, with `TVSET14`/`TVSET21` corrupted. Fix: inside a string, on `\`,
-  consume the next byte as a literal (or translate `\n`/`\"`) **[DATA]**.
-  I did not modify `src/`; this note is the fix description.
-* **One malformed number.** `merchandise.sch` line 208 contains `1#e+006` (item
-  `C_WAGES`). `strtod` returns `1`; the author presumably meant `1e6`. Treat `#` as a
-  terminator and accept the value `1` **[DATA]**.
+  Reads *must* honour it: stopping a string at the first `"` makes those two
+  `merchandise.sch` items swallow the *next* item, i.e. **106** cargo items instead of
+  **107**, with `TVSET14`/`TVSET21` corrupted. `src/script/Sexp.cpp` and
+  `tools/sexp.py` both handle it now; `tools/sch2lua.py --check` reports every `\`
+  with its location so a regression is visible **[DATA]**.
+* **One unusual number.** `merchandise.sch` line 208 contains `1#e+006` (item
+  `C_WAGES`). `#` is the exponent marker for the game's own reader — both
+  `GameData::numWithHash` and `Economy::numLoose` map it to `e` — so the value is
+  **1e6**. Plain `strtod` stops at `#` and returns `1`, which is why `tools/sexp.py`
+  exposes two readers: `canonical_number` (strict C grammar, returns `None` here) and
+  `game_number` (returns `1000000`). Neither silently rewrites the bytes; the atom is
+  emitted verbatim **[DATA]**.
 * **Empty list vs atom.** `()` occurs often (`town` fields, `parking` fields, `ambush`
-  fields). A `Sexp` where "atom" means "all children are strings" wrongly classifies an
-  empty list as an atom — make the distinction explicit.
+  fields). "Atom" must not be defined as "all children are strings" — that wrongly
+  classifies an empty list as an atom. `tools/sexp.py` carries an explicit `kind`, so
+  `()` stays a list and survives the Lua round trip; `src/script/Sexp.cpp` already has
+  `Sexp::List` and is unaffected.
 * **Not a script:** `original/TRUCK.INI` is plain INI (video/audio/gameplay options:
   `[EFFECTS] days=50 weats=60 trafs=100`, `[CAR] RoadWidthReducement=1.5 kmph=on`). The
   pre-decrypted `decrypted/TRUCK.INI.txt` is a Python `repr` dump and is not usable.
@@ -2418,3 +2426,238 @@ for (const auto& o : scriptRules_->obstacles()) setObstacleClosed(o.def->key, o.
 7. **The `weatherandtime` badness curve** (`0x5a9d40`) - only its threshold (0.2) and the
    `weather.ini` presets are known; `TRUCK.INI [EFFECTS] days=50 weats=60` are presumably
    the cycle lengths.
+
+---
+
+## 14. Second pass — the remaining unknowns closed
+
+Addresses are VAs (`VA = file offset + 0x400000`).  Everything here is
+reproducible with `tools/xref.py` (raw ABI xrefs) and the analysed radare2
+project (`r2 -q -p /tmp/r2/king ...`), and is asserted by
+`tools/script_selftest.cpp` (34 checks) and printed by `--script-report`.
+
+### 14.1 The obstacle player-distance constant: **500 u** (was a 250 u guess)
+
+`fcn.0042b2d0` (called from the obstacle scheduler at `0x42b3c7` and `0x42b448`)
+returns `1` when
+
+```
+|| obstacle[+0x270..+0x288] - player[+0x40..+0x58] ||  >  qword [0x64b860]
+```
+
+`0x42b33a` is the `fcomp qword [0x64b860]`, and the bytes at the VA decode to
+`500.0` (double) — the **same global as the obstacle-to-obstacle separation** the
+doc already recorded for `0x42b3a0`.  So there is one distance constant, not two:
+a candidate obstacle is rejected when the player is within 500 u of it *and*
+when it is within 500 u of the closure that is already active.
+`ScriptRules::kObstaclePlayerAway` is now `500.0` and
+`--script-report` prints `playerAway=500`.
+
+### 14.2 The weather-badness curve (`0x5a9d40`) — full formula
+
+`isGoodWeather()` (`0x484010`) calls `fcn.005a9d40` at `0x48401a` and compares
+the result with `0.2` (`0x64b840`).  `0x5a9d40` is 122 bytes and computes the
+whole curve from three fields of the `weatherandtime` object plus the frame
+time:
+
+```
+A = 1 - 2 * w[+0x220]                              ; 0x64c250 = 1.0f
+B = 1 + 0.3 * sin(w[+0x78])                        ; 0x64d0f0 = 0.3
+b = 0.5 * (1 + A + B * (1 - |A|) * sin(w[+0x68] - pi/2 + t))
+badness = clamp(b, 0, 1)                           ; 0x64b670 = 1.0,
+                                                   ; 0x64da00 = pi/2,
+                                                   ; 0x64b6e0 = 0.5
+```
+
+so `w[+0x220]` is **clearness** (1.0 ⇒ badness 0.0, 0.0 ⇒ badness 1.0, 0.5 ⇒ a
+pure sinusoid about 0.5 whose amplitude is `0.5*B`), `w[+0x78]` is the
+amplitude blend and `w[+0x68]` the phase.  The bad weather of a `GOODWEATHER`
+gate is therefore a *sinusoid crossing 0.2 twice per period*, not a step.
+
+`ScriptRules::scriptBadness()` / `scriptBadnessFromWeather()` implement exactly
+this (the second takes the port's 0 = clear convention); `--script-report`
+prints a probe line, e.g. clearness 0.35 → correct 0.3000.
+
+### 14.3 The node pass is a road-position transition, not a radius
+
+`setPlayerPosition` (`0x43e610..0x43e827`) resolves the player's road
+`PositionId`, compares it with the previous one (`0x43e770 cmp eax,edx;
+je 0x43e82c`), and **only on a change** computes `newRoadPos - oldRoadPos`
+(`0x43e7de..0x43e7f1`) as the travel vector and calls `onNodePass` (`0x43e822`).
+So:
+
+* the trigger is *the player's road-graph node changed*, and
+* the direction vector is *node to node*, not a free-world position delta.
+
+`ScriptRuntime::setRoadSegments(const std::vector<ScriptRoadSeg>&)` now feeds the
+port the real `.way` RSEG links (`nodeA`, `nodeB`, `WDTH`, polyline) and the
+runtime reproduces that rule (`roadPass()`): the link the player is inside (its
+own `WDTH/2`, never the 20 u radius) decides which node they are on, the node
+fires when they reach the far end of the link, and the direction is the road
+tangent at that node signed by the direction of travel.  Driving 60 m aside is
+off-road and passes nothing.  Without a fed network the old
+`kNodePassRadius` stand-in is used, so nothing regresses before the App hunk
+below is applied.
+
+### 14.4 `town` field 8 = per-zoom map icon + label keys
+
+All 29 shipped `town` forms have exactly 9 children, so field 8 is the last one.
+Its 29 values fall into three shapes:
+
+| shape | count | example |
+|-------|-------|---------|
+| `( 5000 )` | 3 | `TOWN_AA`, `TOWN_BB_FUEL`, `TOWN_CC_FUEL` |
+| one string | 4 | `( "mapBenzo_ac" )`, `( "map_gasholder_am" )` |
+| two lists of 4 strings | 22 | `( ("map_town_adh" "map_town_ad" "map_town_ad" "map_town_adl") ("node_store_0604" x4) )` |
+
+The 4 entries are the four **map zoom levels** (the suffixes `h` / none / `l`
+and the `b`/`w` variants select the high/mid/low-detail icon), and the second
+list is the node key the map draws the town label at.  So the field is a
+*map-icon descriptor*: `(icons[4], labels[4])`, with the single-string and
+`(5000)` forms being the short-hand for one icon at every zoom.  It is read by
+the map layer, not by gameplay; `GameData::Town::mapIcons` keeps it verbatim.
+
+### 14.5 `ambush` field 7 = the cars-to-spawn slot range (ids enumerated)
+
+The shipped values are *ranges* of 4-digit ids, 2..20 per ambush, grouped by the
+first two digits: `1320..1329`, `2320..2329`, `1330..1349`, `2334..2349`,
+`2031..2039`, `2080..2089`, `1325..1329`, …  They scale with the ambush's
+importance (10 ids for a 5-car ambush, 20 for the largest), and nothing in the
+shipped data indexes them: neither `etrashboxes.sch` (59 parked models), the
+`parking` bays (33 groups) nor the `.way` node names carry those numbers, and no
+consumer could be found in `king.exe` within the budget.  The port therefore
+keeps them as *a car count* (`Ambush::slots.size()`), which is what the doc said
+before; the ids themselves stay unexplained.
+
+### 14.6 `--script-report` after this pass
+
+```
+family=obstacle    total=17 closed=0 toggles=0 separation=500 playerAway=500 delay=[600,900]
+family=ambush      total=87 active=0 armed=0 fired=0 band=[250,600]
+conditions day=8.0<hour<21.0 goodWeatherBadness<0.20 oneShot=0
+badness    clear=0.350 amp=0.000 phase=0.000 t=0 -> 0.3000 (good=0)
+nodePass   rule=nearest-node-radius passes=0 radiusPasses=0 radius=20.0 node=-
+```
+
+The last line switches to `rule=road-position-transition` as soon as the App
+calls `setRoadSegments` (§14.3).
+
+---
+
+## 15. The Lua port — `sch2lua.py` + `lua_sexp.lua` (implemented)
+
+The original files carry no code (§10.1), so there is nothing to decompile: the
+port is a **transpiler of a data format**, and its acceptance test is a round
+trip, not a diff against decompiled source.
+
+```
+original/*.sch ──decrypt──> cp1251 s-expressions ──sexp.py──> tree
+      │                                                          │
+      │                                     sch2lua.py emits Lua tables
+      ▼                                                          ▼
+tools/out/lua/*.lua  ──dofile──> lua_sexp.lua ──> canonical text ──> cmp
+```
+
+### 15.1 What is produced
+
+`tools/sch2lua.py --all` writes 46 files to `tools/out/lua/` (≈280 KB). Each is
+plain data with the head kept as a named field:
+
+```lua
+return {
+  {
+    head = "town",
+    "TOWN_AA",
+    { q = "Алмазный" },          -- the original wrote this atom as "..."
+    "10", {},                    -- `()` is an empty list, not an atom
+    { { head = "node", "node_store_1000", "unload" }, … },
+  },
+  { head = "service", "STO_AA", { q = "" }, "0", { q = "STO_AA" }, { … } },
+}
+```
+
+Two rules make it lossless *and* readable:
+
+* a **bare atom is a plain Lua string** (`"TOWN_AA"`, `"FallAB1Key"`, `"10"`,
+  `"."`) — the value is printed verbatim;
+* an **atom the original wrote as `"..."` is `{ q = "..." }`** — the wrapper is
+  structural, so no in-string marker can collide with Lua's own escape
+  sequences.  (An earlier design used the quote style of the literal as the
+  marker; Lua's `\034`-style escapes make that ambiguous.  Do not go back.)
+* quoted text is stored as UTF-8 (Lua source is UTF-8); `lua_sexp.to_text`
+  transcodes it to cp1251 on the way out.
+
+Fields stay **positional** — the readable field names are the ones in §5, and
+`--check`/`--roundtrip` never conflate a field with a form head.
+
+### 15.2 The check
+
+```
+tools/sch2lua_check.sh
+```
+
+1. reader invariants: escapes, `()` is a list, `""` is a quoted atom,
+   `1#e+006`, canonical idempotency (6 cases + 4 properties);
+2. the five existing Python consumers still agree
+   (`script_survey`/`script_coverage`/`gen_head_table`/`verify_nodes`/`economy_check`);
+3. **round trip**: `canonical(original) == canonical(dofile(lua))` for all 46
+   scripts — 68 765 canonical bytes, byte identical;
+4. all 46 generated files actually load (`assert(dofile(…))`);
+5. **SDTE round trip**: `decrypt -> parse -> re-encrypt -> parse` unchanged for
+   all 46 (a rebuilt `.sch` is not byte-identical to the shipped one — the author's
+   own indentation differs — but it is the same data);
+6. the known defects are still reported with locations.
+
+`--encode <rel|all>` writes a rebuilt `.sch` (canonical text re-encrypted with
+`decrypt_sch`'s keystream), which is the hook for shipping Lua-authored mods
+back into the original format.
+
+### 15.3 Effect on the existing reports
+
+Fixing the reader changed what the earlier tools *see*, which is the point:
+
+| metric | before the fix | after |
+|--------|----------------|-------|
+| `merchandise.sch` cargo items | 106 (an escaped quote swallowed one) | **107** |
+| `merchandise.sch` head `trucks` | 60 | **61** |
+| `script_survey` empty-head rows | 182 (merged children) | **557** |
+
+`economy_check.py` was already 107/107 before (it carried its own escape
+workaround); it now uses `tools/sexp.py` directly and its numbers are unchanged
+(`RESULT: ok`, 147 offers, 1110 jobs, 15 dealers, 11 towns).
+
+### 15.4 There *is* a Scheme interpreter in `king.exe` — but no Scheme code in the data
+
+Worth stating precisely, because the `.sch` extension is misleading.  `king.exe`
+embeds a complete scheme core, identifiable by its own debug strings:
+
+```
+$Id: Sch_eval.cpp   1999/6/25 20:22:40     $Id: sch_read.cpp  2000/12/5  14:49:36
+$Id: sch_krnl.cpp   1999/6/26 20:50:56     $Id: sch_mcro.cpp  1999/3/10  18:05:52
+$Id: Sch_envt.cpp   1999/6/25 16:32:00     $Id: sch_write.cpp 2000/1/10  14:51:20
+… 22 files, plus the symbols `apply`, `eval`, `scheme-report-environment`
+```
+
+and one script filename, `init.sch`, which is **not shipped** (it is not in
+`original/`, in `LOAD.RES`, or in any `.res` payload).  The shipped `.sch`/`.CNF`
+files, by contrast, parse into pure data: after reading all 46 of them there is
+no `define`, `lambda`, `quote` or `if` form anywhere — every head is one of the
+engine's own loader keywords (§8/§9).  So the interpreter exists in the binary
+and the game could evaluate Scheme, but the shipped content is data that the
+engine dispatcher consumes directly (§10.1).  There is therefore nothing to
+decompile; the Lua port is a data transpiler (§15.1) plus a re-implementation of
+the engine rules (§15.4 below).
+
+### 15.5 What Lua buys, and what still has to be written
+
+The data conversion is done; **the behaviour is not**. The conditions live in
+`king.exe` (§10), not in the data, so a Lua port must still port them:
+
+* now: `ScriptRules.{h,cpp}` has the recovered rules (day window, weather
+  badness, node-pass, ambush band, obstacle scheduler) and `--script-report`;
+* next: express those rules once in Lua and load `tools/out/lua/*.lua` as the
+  default content;
+* after that: add an evaluation layer (`on_node_pass`, `on_day_tick`,
+  `on_ambush_armed`, cargo delivery) so missions and events can be *authored* in
+  Lua rather than inferred from the tables. That is where a scripting rewrite
+  actually pays off; re-emitting the tables is only the prerequisite.

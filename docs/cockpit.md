@@ -1,5 +1,12 @@
 # The cockpit instruments (src/game/Cockpit.cpp)
 
+Update 2026-10-05: cockpit is now the default world view. The renderer retains
+the full available cabin geometry, excluding the separate glass overlay, and
+mounts `Rule_0` using the authored `<Brand>RuleSpace` transform. Earlier sections
+describing the cluster-only renderer are historical. The common eye/placement
+constants are still an approximation; the exact `_Viewer` camera composition
+and the seven subtag-4 cabins remain open (see `engine_discrepancies.md`).
+
 Reverse-engineering notes and the implementation of the animated 3D instrument
 cluster.  Written against the retail data in `original/`, verified with
 `tools/b3d_full.py`, a small C++ probe over the parsed `B3D` tree and rendered
@@ -160,9 +167,11 @@ M_needle = vehicleModel * place * A_gl(g) * Rz(-theta)
   (`App::drawWorld`: `setVehicleTwoSided(viewMode_ == 2)`), because from inside
   the cab its back faces would otherwise fill the screen with the exterior skin;
   the dashboard comes from this module instead.  Chase and bonnet are unchanged.
-* `Renderer::setNearPlane()` (new, default 2.0 = the old behaviour, opt-in) is
-  lowered to 0.4 for the cockpit view only: the eye sits ~1.4 units from the
-  dashboard, inside the old near plane, so nothing was visible there before.
+* The world keeps `Renderer::setNearPlane(2.0)` even in the loaded cockpit view.
+  Only the foreground interior is rendered with 0.4, after `clearDepth()` clears
+  depth but preserves world colour. The eye sits ~1.4 units from the dashboard;
+  a shared close near plane needlessly reduced road depth precision. The mirror
+  is a world-only pass and also keeps 2.0. The no-interior fallback still uses 0.4.
 
 ---
 

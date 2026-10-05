@@ -9,6 +9,8 @@ static const char* USAGE =
     "HT2:RE - Hard Truck 2: King of the Road engine reimplementation\n"
     "usage: ht2re [options]\n"
     "  --data DIR        game data root (default ./original)\n"
+    "  --overlay FILE    editor overlay to apply (tools/editor, docs/editor.md):\n"
+    "                    .way node/segment edits and TRUCKS.B3D part/anchor edits\n"
     "  --scene menu|world|vehicle  start scene (default menu)\n"
     "  --screenshot      render one frame and save a BMP, then exit\n"
     "  --out FILE        screenshot output (default shot.bmp)\n"
@@ -33,14 +35,20 @@ static const char* USAGE =
     "  --vehicles        list the vehicle catalogue read from evehicles.sch\n"
     "  --probe x,z[,r]   list the world submeshes near a world position\n"
     "  --hide-mat PREFIX skip world submeshes whose material starts with PREFIX\n"
-    "  --view MODE       chase (default) | cockpit | bonnet - camera for the world\n"
+    "  --view MODE       chase | cockpit (default) | bonnet - camera for the world\n"
     "  --parked-radius R only place parked cars within R units of the spawn\n"
     "  --parked-max N    cap the number of parked cars placed\n"
     "  --traffic N       number of AI cars driving the road graph (0 = none)\n"
     "  --traffic-report S  run the world AI headlessly for S seconds with the\n"
     "                    player parked in its lane; print the AI statistics\n"
     "  --traffic-report-oncoming  park it against the flow (impact scenario)\n"
-    "  --event-radius R  node-event trigger radius (default 250)\n"
+    "  --road-probe [STEP]  measure the traffic's vertical error over the whole road\n"
+    "                    network and the asphalt/ground-mesh gap (default STEP 8 m)\n"
+    "  --road-probe-site x,z[,r]  with --road-probe: dump the worst samples nearby\n"
+    "  --ride-probe x,z  print every layer of the drivable surface at one site\n"
+    "  --traffic-wheel-probe [S]  run the AI at several densities for S seconds and\n"
+    "                    report each car's wheel height error against the asphalt\n"
+    "  --event-radius R  .way-node association radius (default 20)\n"
     "  --hour H          starting hour of the in-game day (0..24, default 9)\n"
     "  --weather NAME    weather: clear|rain|snow|bad|fog or a preset 1..8\n"
     "                    (the presets come from the original WEATHER.INI)\n"
@@ -80,7 +88,7 @@ static const char* USAGE =
     "  --loading-at P    progress 0..1 shown by --loading-shot (default 0.35)\n"
     "  --tex-update N    stream movie frame N through Renderer::updateTexture,\n"
     "                    draw it full screen to --out and exit\n"
-    "  --menu-act ID     activate a menu item at startup (singl | recor | ...)\n"
+    "  --menu-act LIST   activate menu item(s) at startup (graph,back | singl | ...)\n"
     "  --esc             start in the world with the in-game ESC menu open\n"
     "  --esc-screen NAME ESC screen to open: main|exit|sound|control|save|load\n"
     "  --esc-shot FILE   open the ESC screen, render one frame to FILE, exit\n"
@@ -92,6 +100,7 @@ static const char* USAGE =
     "                    cbradio|cbtalk (docs/ui_sort.md)\n"
     "  --ui-shot NAME F  open the panel NAME, render one 1280x720 frame to F, exit\n"
     "  --ui-act LIST     activate panel buttons at startup (alias of --esc-act)\n"
+    "  --ui-key KEY      exercise a world hotkey: Esc|F1|F2|F3|F4|F5\n"
     "  --map             force the original's road-map overlay on in a screenshot\n"
     "  --no-map          never draw the map overlay (panel/UI tests)\n"
     "  --job             take the nearest cargo job at startup (HUD strip cells)\n"
@@ -108,6 +117,7 @@ int main(int argc, char** argv) {
     Options o;
     for (int i = 1; i < argc; ++i) {
         if (argIs(argv[i], "--data") && i + 1 < argc) o.dataDir = argv[++i];
+        else if (argIs(argv[i], "--overlay") && i + 1 < argc) o.overlay = argv[++i];
         else if (argIs(argv[i], "--screenshot")) o.screenshot = true;
         else if (argIs(argv[i], "--out") && i + 1 < argc) o.out = argv[++i];
         else if (argIs(argv[i], "--scene") && i + 1 < argc) o.scene = argv[++i];
@@ -167,6 +177,28 @@ int main(int argc, char** argv) {
             if (sscanf(argv[++i], "%f", &o.trafficReport) != 1) return 1;
         }
         else if (argIs(argv[i], "--traffic-report-oncoming")) o.trafficReportOncoming = true;
+        else if (argIs(argv[i], "--road-probe")) {
+            o.roadProbe = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') o.roadProbeStep = (float)atof(argv[++i]);
+            if (o.roadProbeStep < 1.0f) o.roadProbeStep = 8.0f;
+        }
+        else if (argIs(argv[i], "--traffic-wheel-probe")) {
+            o.trafficWheelProbe = 20.0f;
+            if (i + 1 < argc && argv[i + 1][0] != '-') o.trafficWheelProbe = (float)atof(argv[++i]);
+            if (o.trafficWheelProbe < 1.0f) o.trafficWheelProbe = 20.0f;
+        }
+        else if (argIs(argv[i], "--ride-probe") && i + 1 < argc) {
+            int n = sscanf(argv[++i], "%f,%f", &o.probeX, &o.probeZ);
+            if (n < 2) return 1;
+            o.rideProbe = true;
+        }
+        else if (argIs(argv[i], "--road-probe-site") && i + 1 < argc) {
+            int n = sscanf(argv[++i], "%f,%f,%f", &o.roadProbeX, &o.roadProbeZ, &o.roadProbeR);
+            if (n < 2) return 1;
+            if (n < 3) o.roadProbeR = 200.0f;
+            o.roadProbe = true;
+            o.roadProbeSite = true;
+        }
         else if (argIs(argv[i], "--parked-max") && i + 1 < argc) o.parkedMax = atoi(argv[++i]);
         else if (argIs(argv[i], "--hide-mat") && i + 1 < argc) o.hideMat = argv[++i];
         else if (argIs(argv[i], "--only-mat") && i + 1 < argc) o.onlyMat = argv[++i];
@@ -217,6 +249,7 @@ int main(int argc, char** argv) {
         else if (argIs(argv[i], "--esc-screen") && i + 1 < argc) o.escScreen = argv[++i];
         else if (argIs(argv[i], "--esc-shot") && i + 1 < argc) o.escShot = argv[++i];
         else if (argIs(argv[i], "--esc-act") && i + 1 < argc) o.escAct = argv[++i];
+        else if (argIs(argv[i], "--ui-key") && i + 1 < argc) o.uiKey = argv[++i];
         // --ui-* are the in-game-panel spellings of the same three hooks
         // (docs/ui_sort.md): a panel is just an ESC screen of the Panel family.
         else if (argIs(argv[i], "--ui-panel") && i + 1 < argc) o.escScreen = argv[++i];

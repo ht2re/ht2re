@@ -47,18 +47,46 @@ struct ScriptRules {
     static constexpr double kAmbushArmNear = 250.0;   // 0x64b868
     static constexpr double kAmbushArmFar = 600.0;    // 0x64b870
     static constexpr double kObstacleMinSeparation = 500.0;  // 0x64b860
-    static constexpr double kObstaclePlayerAway = 250.0;     // see docs
+    // fcn.0042b2d0 (called from the obstacle scheduler at 0x42b3c7/0x42b448)
+    // returns 1 when the 3-D distance from the player to the obstacle is
+    //   > qword [0x64b860] = 500.0
+    // i.e. the *same* 500 u global as the obstacle-to-obstacle separation
+    // (0x42b33a `fcomp qword [0x64b860]`).  The previous 250 u was a guess.
+    static constexpr double kObstaclePlayerAway = 500.0;      // 0x64b860 / 0x42b33a
     static constexpr double kObstacleMinDelay = 600.0;       // 0x434f8a/0x434f92
     static constexpr double kObstacleMaxDelay = 900.0;
     // not in king.exe: how near the player must be to a .way node for its
-    // `nodeevent` to count as "passed" (the engine uses the road PositionId).
+    // `nodeevent` to count as "passed" **when no road network has been fed**
+    // (see ScriptRuntime::setRoadSegments for the engine's own rule).
     static constexpr double kNodePassRadius = 20.0;
+
+    // ---- the weather-badness curve (king.exe 0x5a9d40) --------------------
+    // isGoodWeather() at 0x484010 is `fcn.005a9d40(t) < 0.2` (0x48401a calls
+    // it).  0x5a9d40 builds the 0..1 badness from three fields of the
+    // weatherandtime object and the frame time:
+    //   A = 1 - 2 * w[+0x220]                       (0x64c250 = 1.0f)
+    //   B = 1 + 0.3 * sin(w[+0x78])                 (0x64d0f0 = 0.3)
+    //   b = 0.5 * (1 + A + B * (1 - |A|) * sin(w[+0x68] - pi/2 + t))
+    //   clamp(b, 0, 1)                              (0x64b670 = 1.0,
+    //                                                0x64da00 = pi/2,
+    //                                                0x64b6e0 = 0.5)
+    // so `w[+0x220]` is *clearness*: 1.0 -> b = 0 (clear), 0.0 -> b = 1.
+    static constexpr double kBadnessAmpCoeff = 0.3;    // 0x64d0f0
+    static constexpr double kBadnessPhase = 1.5707963267948966;  // 0x64da00 = pi/2
+    static constexpr double kBadnessHalf = 0.5;        // 0x64b6e0
 };
 
 // `hour` is the game clock (weatherandtime, king.exe 0x5a748c): 0..24.
 bool scriptIsDay(double hour);
 // `weather` is 0 = clear .. 1 = storm; good weather is < 0.2.
 bool scriptIsGoodWeather(float weather);
+// The engine's badness curve (king.exe 0x5a9d40) for a weatherandtime object
+// whose clearness is `clearness` (1 = clear sky, 0 = full storm), blend
+// amplitude `amp` (w[+0x78]) and phase `phase` (w[+0x68]) at time `t`
+// seconds.  Returns 0..1; `scriptIsGoodWeather` is `badness < 0.2`.
+double scriptBadness(double clearness, double amp, double phase, double t);
+// Same, but taking the port's 0 = clear .. 1 = storm convention.
+double scriptBadnessFromWeather(double weather, double amp, double phase, double t);
 
 // Everything the script conditions read.  Filled by the game each frame.
 struct ScriptWorldState {
@@ -74,12 +102,21 @@ struct ScriptWorldState {
 
 struct ScriptNodePos { std::string name; double x = 0.0, z = 0.0; };
 
+// One `.way` RSEG road link, as the node-pass rule needs it: the polyline
+// (x, z pairs), the RSEG width and the names of the `.way` nodes at its two
+// ends.  `nodeA` is the first VDAT point, `nodeB` the last.
+struct ScriptRoadSeg {
+    std::string nodeA, nodeB;
+    double width = 8.0;                 // RSEG WDTH
+    std::vector<double> xz;             // x0,z0,x1,z1,...
+};
+
 // Per-instance runtime state (the `active / satisfied / fired` counters of the
 // `--script-report`).
 struct GateState {
     const GameData::Gate* def = nullptr;
     bool satisfied = false;   // the day/weather condition holds
-    bool visible = false;     // satisfied && the per-frame probability roll
+    bool visible = false;     // satisfied && the activation-edge probability roll
     uint64_t rolls = 0;
 };
 
@@ -142,10 +179,29 @@ public:
     // node-pass trigger, the ambush band and the obstacle scheduler.
     void setNodePositions(const std::vector<ScriptNodePos>& nodes);
     const ScriptNodePos* nodePos(const std::string& name) const;
+    // The road network (every RSEG of every loaded tile).  When it is fed, the
+    // node-pass trigger becomes the engine's rule (see updateNodeEvents): the
+    // player "passes" the .way node at the end of the road link they are
+    // driving on, exactly like the original's road PositionId (king.exe
+    // 0x43e770 compares the new PositionId with the previous one and 0x43e822
+    // calls onNodePass).  Without it the 20 u radius stand-in is used.
+    void setRoadSegments(const std::vector<ScriptRoadSeg>& segs);
+    bool haveRoadSegments() const { return !roadSegs_.empty(); }
+    // The .way node the player's road position is currently on ("" = off-road).
+    const std::string& currentRoadNode() const { return lastRoadNode_; }
+    // how many passes the road rule produced (diagnostics / --script-report)
+    size_t roadPasses() const { return roadPasses_; }
+    size_t radiusPasses() const { return radiusPasses_; }
 
     // Feed an explicit node pass (the App already resolves the nearest .way
     // node).  Cheap; can be called in addition to the position-driven pass.
     void passNode(const std::string& wayNode);
+    // Seed the travel vector used by the first onNodePass call.  king.exe gets
+    // this vector from the road position transition; a freshly spawned player
+    // has no previous free-world sample, so the App seeds it from vehicle yaw.
+    void setPreviousPosition(double x, double z) {
+        prevX_ = x; prevZ_ = z; havePrev_ = true;
+    }
 
     // One frame.  Evaluates every condition family, advances the timers and
     // fills the coverage counters.
@@ -169,6 +225,11 @@ public:
     bool nodeEventOneShot() const { return oneShot_; }
     void setNodePassRadius(double r) { passRadius_ = r; }
     void setSeed(uint32_t s) { rng_ = s ? s : 1; }
+    // The weatherandtime probe `--script-report` prints the engine's own
+    // badness curve for (clearness w[+0x220], amp w[+0x78], phase w[+0x68]).
+    void setBadnessProbe(double clearness, double amp, double phase) {
+        badnessProbe_[0] = clearness; badnessProbe_[1] = amp; badnessProbe_[2] = phase;
+    }
 
     // ---- the tuning / upgrade table (restable.sch) -----------------------
     const std::vector<GameData::UpgradeLevel>* levels(const std::string& pr) const;
@@ -196,6 +257,10 @@ private:
     bool passDirectionOk(const GameData::NodeEvent& e, double mx, double mz) const;
     double distTo(double x, double z, const ScriptWorldState&) const;
     uint32_t rnd();
+    // the engine's node-pass rule; returns the node the player moved onto (or
+    // ""), and fills the travel vector the original derives from the two road
+    // positions (0x43e7de: new - previous).
+    std::string roadPass(const ScriptWorldState& st, double& mx, double& mz);
 
     const GameData& gd_;
     std::vector<GateState> gates_;
@@ -212,6 +277,11 @@ private:
     std::string lastNode_;
     bool oneShot_ = false;
     double passRadius_ = ScriptRules::kNodePassRadius;
+    std::vector<ScriptRoadSeg> roadSegs_;
+    std::string lastRoadNode_;
+    double lastRoadArc_ = 0.0;
+    size_t roadPasses_ = 0, radiusPasses_ = 0;
+    double badnessProbe_[3] = {0.35, 0.0, 0.0};
     double nextObstacleToggle_ = ScriptRules::kObstacleMinDelay;
     uint32_t rng_ = 0x12345678u;
     ScriptCoverage cov_;

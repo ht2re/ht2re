@@ -343,8 +343,8 @@ class Traffic:
         c.x, c.h, c.z = x, h, z
         c.yaw = math.degrees(math.atan2(fx, fz))
         c.lane = min(self.lane_offset, ed['width'] / 3.0)
-        c.x += -fz * c.lane          # right = forward x up
-        c.z += fx * c.lane
+        c.x += fz * c.lane           # right in the mirrored D3D world
+        c.z -= fx * c.lane
 
     def lane_for(self, e):
         return min(self.lane_offset, self.edges[e]['width'] / 3.0)

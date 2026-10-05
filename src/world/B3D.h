@@ -115,6 +115,17 @@ public:
 
     std::vector<std::pair<std::string, Anchor>> anchorList;   // name -> transform
     std::vector<std::pair<std::string, std::vector<std::string>>> linkList;  // container -> anchors
+    // The anchors the last buildScene()/buildNamedScene() actually placed a link
+    // at.  A container holds every model's anchors, so the editor draws exactly
+    // these (tools/editor/ModelEditor.cpp).
+    std::vector<std::string> usedAnchors;
+
+    // --- editor overlay support (src/world/Overlay.cpp, docs/editor.md) -----
+    // The transforms buildFrom() places linked containers with.  The overlay
+    // rewrites them before buildNamedScene() so a mirror/wheel mount can be
+    // nudged or re-oriented without touching the shipped .b3d.
+    bool anchorOf(const std::string& name, Anchor& out) const;
+    bool setAnchor(const std::string& name, const Anchor& a);
 
 private:
     std::map<std::string, Anchor> anchors;

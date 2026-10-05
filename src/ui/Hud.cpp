@@ -86,6 +86,7 @@ bool Hud::load(Renderer& r, const std::string& dataDir) {
         };
         upload("m16\\pager_p.msk", pagerTex_);
         upload("m16\\pager_a.msk", pagerATex_);
+        upload("m16\\pause.msk", pauseTex_);
     }
     (void)pager_; (void)pagerA_;
     // the camera flash sprite of the fine panel (COMMON.RES, 4:4:4:4)
@@ -98,17 +99,25 @@ bool Hud::load(Renderer& r, const std::string& dataDir) {
     }
     // the original HUD fonts (loose files next to the data)
     if (labelFont_.loadFon(r, dataDir + "/matrix.fon")) {
-        labelFont_.setCodeOffset(0x10);
+        // matrix.fon is indexed by the actual byte value (including cp1251).
+        // Only icon.fon's large digits live at ASCII + 0x10.  Applying that
+        // offset here shifted every Russian label into unrelated glyph cells.
+        labelFont_.setCodeOffset(0);
         label_ = &labelFont_;
     }
     if (bigFont_.loadFon(r, dataDir + "/icon.fon")) {
         bigFont_.setCodeOffset(0x10);
         big_ = &bigFont_;
     }
-    LOG("hud: original strip loaded (tablo %s, pager %s, fonts %s/%s)",
-        tablo_ ? "yes" : "no", pagerTex_ ? "yes" : "no",
+    LOG("hud: original strip loaded (tablo %s, pager %s, pause %s, fonts %s/%s)",
+        tablo_ ? "yes" : "no", pagerTex_ ? "yes" : "no", pauseTex_ ? "yes" : "no",
         label_ ? "matrix.fon" : "-", big_ ? "icon.fon" : "-");
     return true;
+}
+
+void Hud::drawPause(Renderer& r) {
+    if (!pauseTex_) return;
+    r.quad2D(pauseTex_, layoutX(r), 0.0f, kArtWidth, kArtHeight, 1, 1, 1, 1);
 }
 
 void Hud::draw(Renderer& r, Font& font, const Values& v) {

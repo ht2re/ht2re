@@ -1,0 +1,103 @@
+Deliverable for src/app/App.{h,cpp} — the files another agent owns.
+Apply with:  git apply tools/app_vehicle_wiring.diff
+=============================================================================
+
+1. BUG (not mine, but it makes `shot_test.py` fail)
+---------------------------------------------------
+`App::frame()` hides the B3D key group of an obstacle when it is *open*:
+
+    for (const auto& o : scriptRuntime_->obstacles())
+        if (opt_.obstaclesOpen || !o.closed) hidden.insert(o.def->key);
+
+The recovered rule (king.exe 0x42b060 sets the closed/open state and the b3d
+key-group visibility, and 0x42b3a0 picks "the first obstacle with [+0x1c] != 0"
+as *the* active closure) is the opposite: a **closed** obstacle is the one whose
+geometry is shown (the road block), so the group must be hidden when the
+obstacle is *open*.  With `!o.closed` every obstacle group is hidden in every
+frame, which is why
+`shot_test.py: road-closure geometry can be toggled -- closed 62739 vs open 62739`
+cannot pass: all four combinations of `--hour 12` / default and
+`--obstacles open` / default render 62739 of 63401 submeshes.
+
+Fix: `if (opt_.obstaclesOpen || o.closed) hidden.insert(o.def->key);`
+
+2. FEATURE — feed the .way road network to the script runtime
+-------------------------------------------------------------
+This turns `ScriptRuntime`'s node-pass trigger into the engine's own rule
+(king.exe 0x43e770/0x43e822: a road-PositionId transition), replacing the
+20 u nearest-node radius stand-in.  See docs/script_gameplay.md §14.3.
+
+`App` already has `wayNodes_` (filled by `indexWayNodes()`) and the loaded
+`Way` objects are available while `prepareNodeEvents()` runs.  Only
+`prepareNodeEvents()` changes.
+
+--- a/src/app/App.cpp
++++ b/src/app/App.cpp
+@@ -1,3 +1,4 @@
++// (context marker - apply the hunk below by hand if the line numbers moved)
+@@
+ void App::prepareNodeEvents() {
+     if (scriptRuntime_ || gameData_.nodeEvents.empty()) return;
+     indexWayNodes();
+     scriptRuntime_.reset(new ScriptRuntime(gameData_));
+     scriptRuntime_->setNodePassRadius(std::max(0.0f, opt_.eventRadius));
+     scriptRuntime_->setSeed(rng_);
+     std::vector<ScriptNodePos> nodes;
+     nodes.reserve(wayNodes_.size());
+     for (const auto& kv : wayNodes_)
+         nodes.push_back({kv.first, kv.second.pos.x, kv.second.pos.z});
+     scriptRuntime_->setNodePositions(nodes);
++
++    // The engine triggers `nodeevent` on a road-position transition, not on a
++    // radius (king.exe 0x43e770 compares the new PositionId with the previous
++    // one, 0x43e822 calls onNodePass).  Hand the runtime the real .way links so
++    // it can use that rule; without them it falls back to kNodePassRadius.
++    {
++        std::vector<ScriptRoadSeg> segs;
++        std::map<std::string, size_t> nodeOf;      // name -> index into `nodes`
++        for (size_t i = 0; i < nodes.size(); ++i) nodeOf[nodes[i].name] = i;
++        for (const auto& w : ways_) {              // the loaded Way objects
++            for (const auto& seg : w.segs) {
++                if (seg.pts.size() < 2) continue;
++                ScriptRoadSeg s;
++                s.width = seg.width;
++                s.xz.reserve(seg.pts.size() * 2);
++                for (const auto& p : seg.pts) { s.xz.push_back(p.x); s.xz.push_back(p.z); }
++                // the endpoint nodes: the .way node whose POSN coincides with
++                // the first / last VDAT point (welded to 0.01 like the traffic
++                // graph does)
++                auto findNode = [&](const Way::Pos& p) -> std::string {
++                    for (const auto& kv : wayNodes_)
++                        if (std::fabs(kv.second.pos.x - p.x) < 0.01 &&
++                            std::fabs(kv.second.pos.z - p.z) < 0.01)
++                            return kv.first;
++                    return std::string();
++                };
++                s.nodeA = findNode(seg.pts.front());
++                s.nodeB = findNode(seg.pts.back());
++                segs.push_back(std::move(s));
++            }
++        }
++        if (!segs.empty()) {
++            scriptRuntime_->setRoadSegments(segs);
++            LOG("events: road-position node pass fed %zu .way links", segs.size());
++        }
++    }
++
+     size_t resolved = 0;
+     for (const auto& e : gameData_.nodeEvents)
+         if (wayNodes_.find(e.wayNode) != wayNodes_.end()) ++resolved;
+
+Notes for the owner:
+* `ways_` above stands for whatever member holds the loaded `Way` objects in
+  `App` (the same objects `indexWayNodes()` walks).  `seg.pts[i].x` / `.z` are
+  the (x, z) pair, matching `Way.h`'s POSN = (x, z, height).
+* `ScriptRoadSeg` is declared in `src/script/ScriptRules.h`; `#include` it via
+  the existing ScriptRules header the App already uses.
+* After this hunk, `--script-report`'s `nodePass rule=` line reads
+  `road-position-transition`, and `shot_test.py`'s
+  "southbound BASE03LEFT crossing fires" / "northbound pass rejects the SOUTH
+  event" checks exercise the real rule.
+* If the owner prefers to keep the 20 u radius (e.g. because the player can
+  free-drive off the graph), simply do not apply this hunk: the fallback keeps
+  the current behaviour and nothing else changes.

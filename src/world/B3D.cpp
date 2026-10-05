@@ -465,6 +465,24 @@ std::vector<uint32_t> B3D::subtagHistogram() const {
     return h;
 }
 
+bool B3D::anchorOf(const std::string& name, Anchor& out) const {
+    auto it = anchors.find(name);
+    if (it == anchors.end()) return false;
+    out = it->second;
+    return true;
+}
+
+bool B3D::setAnchor(const std::string& name, const Anchor& a) {
+    auto it = anchors.find(name);
+    if (it == anchors.end()) return false;
+    it->second = a;
+    // anchorList is the public mirror the editor reads; keep both in sync.
+    for (auto& p : anchorList)
+        if (p.first == name) { p.second = a; return true; }
+    anchorList.emplace_back(name, a);
+    return true;
+}
+
 void B3D::buildScene() {
     sceneName_ = "";
     std::vector<const Node*> roots;
@@ -488,6 +506,7 @@ bool B3D::buildNamedScene(const std::string& rootName) {
 
 void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked) {
     subs.clear();
+    usedAnchors.clear();
     bbMin[0] = bbMin[1] = bbMin[2] = 1e30f;
     bbMax[0] = bbMax[1] = bbMax[2] = -1e30f;
     if (meshList.empty() || faceList.empty()) return;
@@ -599,6 +618,12 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked) {
                         memcpy(local.t, ia->second.t, sizeof(local.t));
                         local.identity = false;
                         comb = xfMul(xf, local);
+                        // The editor draws these (tools/editor/ModelEditor.cpp);
+                        // the container also holds every other vehicle's anchors.
+                        bool seen = false;
+                        for (const std::string& u : self->usedAnchors)
+                            if (u == from) { seen = true; break; }
+                        if (!seen) self->usedAnchors.push_back(from);
                     }
                     ++instances;
                     go(*ib->second, -1, comb, depth + 1, grp);

@@ -751,3 +751,91 @@ left-hand road map is `src/ui/Map.{h,cpp}` (it used to be a corner minimap insid
   `Economy` derives one as `25:00 + distance / 16 m/s` (a fresh job therefore
   reads ~25:00 like the frames) and pays half the reward when it runs out.
   **[INFERRED]**
+
+---
+
+## 9. Front-end / in-game menu **flow** (verified against `king.exe`)
+
+Section 5 already lists the recovered button-entry points.  This section records
+what the *flow* is, what the port implements, and the deviations fixed in
+`src/ui/Menu.{h,cpp}`.  Drive the whole graph with:
+
+```bash
+python3 tools/menu_flow_test.py          # 17 checks, 0 failures
+python3 tools/menu_flow_test.py --list   # the flow table only
+```
+
+Screenshots: `shots/menu_flow_main.bmp` (front-end) and
+`shots/menu_flow_esc_{main,exit,sound,control,save,load}.bmp`.
+
+### 9.1 The front-end is **one** screen, not a stack
+
+All 8 buttons come from one constructor run at `0x1282f8..0x1283f4`
+(`0x10e500(flags, Y, X, id, name)`), the backdrop `m\back_main.txr` is blitted
+once at `(0,0)` (`0x128be0`), and the only other art is `common.msk`,
+`runner_*.msk` and `cursor.msk`.  So the start menu has **no sub-screens and no
+"back"**: every button leaves the screen to another module.  The port's
+`src/ui/Menu.cpp` already matches this (one screen, 8 sockets, `_a/_ap/_p`
+states), and `tools/menu_flow_test.py` verifies that all 8 sockets carry art.
+
+| button | id | opens (recovered entry point) | port |
+|--------|----|------------------------------|------|
+| `m\graph` | 107 | `g\backGrafOpt.txr` | not implemented (`Menu::screenFor("graph") == "graph"`) |
+| `m\contr` | 103 | `c\backCtrlOpt.txr` = the ESC **control** screen | not implemented, but `EscMenu` *has* that screen |
+| `m\demo` | 106 | runs the demo | not implemented |
+| `m\recor` | 101 | `r\backRcrd.txr` → rec \| replay | plays the intro movie |
+| `m\singl` | 102 | `s\backSing.txr` → new \| load | enters the world directly |
+| `m\multi` | 104 | `n\backMult.txr` → conn → host | not implemented |
+| `m\chang` | 105 | `d\backDriv.txr` | not implemented |
+| `m\exit` | 108 | `e\backExitDoit.txr` — **a confirmation screen** | fixed, see 9.3 |
+
+### 9.2 The in-game ESC family is the real flow graph
+
+`EscMenu` implements the 6 `Family::Esc` screens (`main`, `exit`, `sound`,
+`control`, `save`, `load`) plus the side panels.  The recovered entry points and
+the port's graph agree, and the walks in `tools/menu_flow_test.py` confirm every
+edge:
+
+```
+ESC main ──sound────▶ sound  ──ok/canc──▶ ESC main
+         ──control──▶ control──ok/canc──▶ ESC main
+         ──savg─────▶ save   ──nsave────▶ ESC main
+         ──loadg────▶ load   ──nsave────▶ ESC main
+         ──exitsys──▶ exit (the confirm) ──excanc──▶ ESC main
+                                        ──exsave──▶ exitsave
+         ──main─────▶ front-end menu (action "menu")
+```
+
+**"Back" semantics** (`EscMenu::back`, `src/ui/EscMenu.cpp`): with a side panel
+open Esc resumes driving (`"resume"`); on any ESC sub-screen Esc returns to the
+ESC main (`"back"`); on the ESC main Esc closes it (`"resume"`).  That matches
+the original, where the panels are dialogs and the ESC pages nest one level.
+The front-end itself has no "back" (9.1), so Esc at the start menu quitting the
+game is a port choice, not an original rule.
+
+**Keyboard / gamepad / mouse parity.**  The ESC family has all three: `App` maps
+`SDL_CONTROLLERBUTTONDOWN` (dpad → `selectNext/adjustSelected`, A/START →
+`activateSelected`, B/BACK → back) plus `SDL_MOUSEMOTION`/`BUTTONDOWN`.  The
+front-end `Menu` only had keyboard + mouse — the pad branch in `App::run()` is
+guarded by `esc_.active()`.  `Menu::handlePad(PadButton)` now exists (dirs →
+`handleKey(UP/DOWN/LEFT/RIGHT)`, A/START → RETURN, B → ESC), so the App only has
+to forward the pad event; the hunk is in `tools/app_vehicle_wiring.diff`.
+
+### 9.3 Deviations fixed
+
+| deviation | original | port before | port now |
+|-----------|----------|-------------|----------|
+| **exit confirmation** | `m\exit` → `e\backExitDoit.txr`, and the in-game popup has `exsave`/`exnsave`/`excanc` | `ВЫХОД ИЗ ИГРЫ` quit on the first RETURN | `Menu::activate()` opens a modal confirm (`confirmText_`, yes/no, the safe answer preselected); the `exit` id is reported only after the confirm. B/Esc/click-right cancels |
+| **pad navigation** | same ids for every input source | pad did nothing on the front-end | `Menu::handlePad()` + `tools/app_vehicle_wiring.diff` |
+| **mouse routing** | one activation path | `handleMouse` set `activated_` directly, bypassing the confirm | `handleMouse` → `activate()` |
+| **hot keys** | button ids 101..108 | matched `key == it.socketId` | unchanged, but routed through `activate()` so id-hotkey `exit` also confirms |
+
+### 9.4 What is still not implemented (needs the App, not `Menu`)
+
+`graph`, `contr`, `demo`, `multi`, `chang` have no screen in the port.  The
+closest win is `contr`: `EscMenu` already builds the recovered `control` screen
+(`c\backCtrlOpt.txr`, sliders `forcel/centerl/sensl`, `autgb`, `c\canc`, `c\def`),
+so `m\contr` should open it instead of printing "НЕ РЕАЛИЗОВАНО"; that is an
+`App::run()` hunk, not a `Menu` one.  `m\singl` should open
+`s\backSing.txr` (new | load) before entering the world — the port has the
+save/load screens but jumps straight in.

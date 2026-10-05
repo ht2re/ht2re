@@ -1,6 +1,8 @@
 #pragma once
+#include <map>
 #include <vector>
 #include "B3D.h"
+#include "RoadSurface.h"
 
 namespace ht2 {
 
@@ -29,9 +31,50 @@ public:
                const std::vector<float>& roadPts = {},
                float cellSize = 12.0f,
                const Terrain* base = nullptr);
+    // The road network as *segments* (x, z, y per vertex, 1 = segment break).
+    // The cell-averaged `road_` field is then only the coarse terrain fallback;
+    // the drivable profile answered by surfaceAt()/surfaceOnRoad() is the exact
+    // nearest point of this polyline set, so it has no 12-unit quantisation.
+    void setRoadSegments(const std::vector<float>& xyz1);
+    // The tiles' own road surfaces (src/world/RoadSurface.{h,cpp}), built from
+    // the world meshes.  It is the surface between the `.way` profile and the
+    // terrain: on the network the exact polyline wins (it is the authored
+    // centreline), just off it the tile asphalt answers, and only beyond that
+    // does the terrain field take over.
+    void buildRoadSurface(const std::vector<B3D::SubMesh>& meshes);
+    const RoadSurface& roadSurface() const { return roadField_; }
+    // One entry point for "what is the drivable surface here": the `.way`
+    // profile within 32 m of the network (blended into the terrain over
+    // 32..80 m), else the tile asphalt within 12 m (blended over 4..12 m), else
+    // the terrain field.  `outSource` is 0 = terrain, 1 = `.way`, 2 = tile road.
+    float drivableY(float x, float z, float fallback, int* outSource = nullptr,
+                    float* outDist = nullptr) const;
     bool empty() const { return w_ <= 0 || h_ <= 0 || data_.empty(); }
     // world height of the ground, or `fallback` when the map has no data there
     float heightAt(float x, float z, float fallback = 0.0f) const;
+    // world height of the *drivable road surface* at (x, z), or `fallback` when
+    // the point is not on a road.  This is the road network's own profile
+    // (every `.way` RSEG polyline point, averaged per cell and taken from the
+    // nearest road cell), which is what the tile geometry carries and what the
+    // AI vehicles' `Car::h` comes from - so a vehicle that follows `heightAt()`
+    // (which is a *terrain* field, smoothed and mixed with the off-road ground
+    // in the same cell) can sit several units off the asphalt.  See
+    // docs/terrain_road.md "why the cars left the road".
+    float surfaceAt(float x, float z, float fallback = 0.0f) const;
+    // Same, with a validity flag: true only when the point is close enough to a
+    // road cell for its height to be the carriageway (GroundMap::onRoad()).
+    bool surfaceOnRoad(float x, float z, float& outY) const;
+    // Exact drivable profile: the nearest `.way` polyline point, interpolated.
+    // The search runs over a 64-unit bucket grid, so it is independent of the
+    // number of segments (a few candidate segments per query).
+    float roadProfileAt(float x, float z, bool& found, float maxDist = 32.0f) const;
+    // Same, with the distance to the nearest road point.  `maxDist` bounds the
+    // search: outside it `found` is false (a road 100 m away is not the road
+    // under the wheels).
+    float roadProfileAt(float x, float z, bool& found, float& outDist,
+                        float maxDist = 32.0f) const;
+    bool onRoad(float x, float z) const;
+    size_t roadCells() const { return roadCells_; }
 
     // --- tile-surface ceiling ----------------------------------------------
     // A field the generated terrain mesh must stay below.  It is built from the
@@ -83,7 +126,29 @@ private:
     std::vector<float> clear_;     // minY_ dilated by CLEARANCE_RADIUS cells
     std::vector<float> near_;      // tile surface at the nearest covered cell
     std::vector<float> dist_;      // distance to the nearest covered cell
+    // The road network's own profile, kept apart from `data_` because that one
+    // is a *terrain* field: the road cells are averaged per cell and the
+    // smoothing pass would otherwise drag them towards the off-road ground
+    // (and vice versa) inside the same 12-unit cell.
+    std::vector<float> road_;      // per cell: mean road height (NaN = no road)
+    std::vector<float> roadDist_;  // distance to the nearest road cell
     std::vector<uint8_t> water_;   // 1 = sea / lake surface   // NAN = no sample
+    size_t roadCells_ = 0;
+    // The road network itself: `roadPts_` is a flat (x, z, y) stream, `roadIdx_`
+    // the segment id of every point (a segment ends where the id changes), and
+    // `roadBuckets_` a 64-unit spatial hash of the segment ids.
+    std::vector<float> roadPts_;
+    // Distance from each point to the nearest node of the graph (0 at a node):
+    // the `.way` VDAT keeps straight chords across a polyline, so a point whose
+    // chord is far from the graph is an interpolation artefact, not a road.
+    std::vector<float> roadEndDist_;
+    std::vector<int> roadSegOf_;
+    std::vector<int> roadSegStart_;
+    std::vector<int> roadSegCount_;
+    static constexpr float kRoadBucket = 64.0f;
+    std::map<long long, std::vector<int>> roadBuckets_;
+    void bucketSegment(int seg, float ax, float az, float bx, float bz);
+    RoadSurface roadField_;
 };
 
 } // namespace ht2

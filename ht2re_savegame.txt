@@ -1,0 +1,9 @@
+HT2RE-SAVE 1
+# Hard Truck 2: King of the Road engine reimplementation save
+vehicle ZilR
+money 45000
+pos -3020.000 -4625.000 0.000
+fuel 1.0000
+damage 0.0000
+job -1
+delivered 0
