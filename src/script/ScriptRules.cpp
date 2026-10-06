@@ -79,14 +79,18 @@ void ScriptRuntime::setNodePositions(const std::vector<ScriptNodePos>& nodes) {
     nodeIndex_.clear();
     for (size_t i = 0; i < nodes_.size(); ++i) nodeIndex_[nodes_[i].name] = i;
     for (auto& o : obstacles_) {
+        o.havePos = false;
         const std::string& n = !o.def->debrisA.empty() ? o.def->debrisA
                              : (!o.def->workNodes.empty() ? o.def->workNodes[0] : o.def->debrisB);
-        if (const ScriptNodePos* p = nodePos(n)) { o.x = p->x; o.z = p->z; o.havePos = true; }
+        if (const ScriptNodePos* p = nodePos(n)) { o.x = p->x; o.z = p->z; o.y = p->y; o.havePos = true; }
+        if(!o.havePos)o.closed=false;
     }
     for (auto& a : ambushes_) {
+        a.havePos = false;
         if (const ScriptNodePos* p = nodePos(a.def->wayNode)) {
-            a.x = p->x; a.z = p->z; a.havePos = true;
+            a.x = p->x; a.z = p->z; a.y = p->y; a.havePos = true;
         }
+        if(!a.havePos) { a.active=false;a.armed=false;a.satisfied=false; }
     }
 }
 
@@ -101,9 +105,10 @@ uint32_t ScriptRuntime::rnd() {
     return rng_ >> 8;
 }
 
-double ScriptRuntime::distTo(double x, double z, const ScriptWorldState& st) const {
+double ScriptRuntime::distTo(double x, double z, const ScriptWorldState& st, double y) const {
     double dx = x - st.px, dz = z - st.pz;
-    return std::sqrt(dx * dx + dz * dz);
+    double dy = st.haveHeight ? y-st.py : 0;
+    return std::sqrt(dx * dx + dz * dz + dy * dy);
 }
 
 void ScriptRuntime::clearPending() {
@@ -121,9 +126,18 @@ void ScriptRuntime::passNode(const std::string& wayNode) {
 // `people` gates - king.exe 0x42ac83..0x42ae69
 // ---------------------------------------------------------------------------
 void ScriptRuntime::updateGates(const ScriptWorldState& st) {
+    // The port currently loads all tiles once. Uninitialised groups receive
+    // that initial load here; frame ticks never reroll loaded modules.
+    for(const auto& g:gates_)if(!g.loaded)onModuleLoad(g.def->tile,st);
+}
+
+void ScriptRuntime::onModuleLoad(const std::string& module,const ScriptWorldState& st) {
+    if(st.paused)return;
     const bool day = scriptIsDay(st.hour);
     const bool good = scriptIsGoodWeather(st.weather);
     for (auto& g : gates_) {
+        if(g.def->tile!=module)continue;
+        g.loaded=true;
         bool cond = false;
         switch (g.def->kindId) {
             case 1: cond = true; break;                       // UNCONDITIONAL
@@ -132,14 +146,10 @@ void ScriptRuntime::updateGates(const ScriptWorldState& st) {
             case 4: cond = day && good; break;                // DAYGW (0x42ade8)
             default: cond = false; break;
         }
-        const bool wasSatisfied = g.satisfied;
         g.satisfied = cond;
         if (!cond) { g.visible = false; continue; }
-        // A probability is the density of this decoration group, not a frame
-        // animation.  Roll when the condition becomes active and keep the
-        // result stable until day/weather disables it; otherwise geometry
-        // flickers and rebuilds the complete world scene every frame.
-        if (wasSatisfied) continue;
+        // 0x42acb7 first filters the module name; this entire switch belongs
+        // to onModuleLoadX, not the frame loop or a condition-edge callback.
         ++g.rolls;
         // 0x42adc2: roll = rand()/1e6; visible when prob > roll
         const double roll = (double)(rnd() % 1000000u) / 1000000.0;
@@ -160,10 +170,52 @@ bool ScriptRuntime::passDirectionOk(const GameData::NodeEvent& e, double mx, dou
     return dot > 0.0;                               // 0x40b292: fcomp 0.0
 }
 
+std::vector<ScriptRoadSeg> scriptRoadSegments(const std::vector<Way::Seg>& segs,
+                                            const std::vector<ScriptNodePos>& nodes) {
+    std::vector<ScriptRoadSeg> out;
+    auto nameAt = [&](const Way::Pos& p) {
+        double best=.25; // 0.5m authored coordinate tolerance, not a pass radius
+        std::vector<std::string> names;
+        for(const auto& n:nodes) {
+            if(n.name.empty())continue;
+            const double dx=n.x-p.x,dz=n.z-p.z,dy=n.y-p.y;
+            const double d=dx*dx+dz*dz+dy*dy;
+            if(d<best-1e-8) { best=d;names.clear();names.push_back(n.name); }
+            else if(!names.empty()&&std::fabs(d-best)<1e-8)names.push_back(n.name);
+        }
+        return names;
+    };
+    for(const auto& s:segs) {
+        if(s.pts.size()<2)continue;
+        size_t start=0;
+        auto a=nameAt(s.pts.front());
+        for(size_t end=1;end<s.pts.size();++end) {
+            const auto b=nameAt(s.pts[end]);
+            if(b.empty()&&end+1<s.pts.size())continue;
+            ScriptRoadSeg g;g.aliasesA=a;g.aliasesB=b;
+            if(!a.empty())g.nodeA=a.front();
+            if(!b.empty())g.nodeB=b.front();
+            const double endWidth=s.width1>0?s.width1:s.width;
+            g.width=s.width+(endWidth-s.width)*start/(s.pts.size()-1);
+            g.widthEnd=s.width+(endWidth-s.width)*end/(s.pts.size()-1);
+            for(size_t i=start;i<=end;++i) {
+                g.xz.push_back(s.pts[i].x);g.xz.push_back(s.pts[i].z);
+                g.heights.push_back(s.pts[i].y);
+            }
+            out.push_back(std::move(g));start=end;a=b;
+        }
+    }
+    return out;
+}
+
 void ScriptRuntime::setRoadSegments(const std::vector<ScriptRoadSeg>& segs) {
     roadSegs_ = segs;
     lastRoadNode_.clear();
-    lastRoadArc_ = 0.0;
+    roadAliases_.clear();
+    for(const auto& s:segs) {
+        if(!s.nodeA.empty())roadAliases_[s.nodeA]=s.aliasesA;
+        if(!s.nodeB.empty())roadAliases_[s.nodeB]=s.aliasesB;
+    }
 }
 
 // The engine's node pass.  king.exe's setPlayerPosition (0x43e610) resolves the
@@ -195,6 +247,12 @@ std::string ScriptRuntime::roadPass(const ScriptWorldState& st, double& mx, doub
             t = std::max(0.0, std::min(1.0, t));
             const double cx = ax + t * dx, cz = az + t * dz;
             const double d = std::sqrt((px - cx) * (px - cx) + (pz - cz) * (pz - cz));
+            if(st.haveHeight&&g.heights.size()==n) {
+                const double h=g.heights[i]+t*(g.heights[i+1]-g.heights[i]);
+                // Port projection guard, not a recovered original constant.
+                // Prevent crossing an unrelated bridge on the same x/z.
+                if(std::fabs(h-st.py)>4.0) { arc+=len;continue; }
+            }
             if (d < bestD) {
                 bestD = d;
                 bestSeg = s;
@@ -204,37 +262,34 @@ std::string ScriptRuntime::roadPass(const ScriptWorldState& st, double& mx, doub
         }
         if (bestSeg == s) bestTotal = arc;
     }
-    if (bestSeg >= roadSegs_.size()) return std::string();
+    if (bestSeg >= roadSegs_.size()) { lastRoadNode_.clear();return std::string(); }
     const ScriptRoadSeg& g = roadSegs_[bestSeg];
     // off-road: the engine has no road position at all, so nothing is passed
-    const double halfWidth = std::max(2.0, 0.5 * g.width);
+    const double width=g.width+(g.widthEnd>0?g.widthEnd-g.width:0)*
+        (bestTotal>0?bestS/bestTotal:0);
+    const double halfWidth = std::max(2.0, 0.5 * width);
     if (bestD > halfWidth) {
         lastRoadNode_.clear();
         return std::string();
     }
     // "at a node" = within one road width of either end of the link
-    const double zone = std::max(g.width, 5.0);
+    const double zone = std::max(width, 5.0);
     std::string node;
-    if (bestS <= zone && !g.nodeA.empty()) node = g.nodeA;
-    else if (bestTotal - bestS <= zone && !g.nodeB.empty()) node = g.nodeB;
+    const bool atA=bestS<=zone&&!g.nodeA.empty();
+    const bool atB=bestTotal-bestS<=zone&&!g.nodeB.empty();
+    if(atA&&(!atB||bestS<=bestTotal-bestS))node=g.nodeA;
+    else if(atB)node=g.nodeB;
     if (node.empty() || node == lastRoadNode_) {
         lastRoadNode_ = node;
         return std::string();
     }
-    // the travel vector is the road direction at the node, signed by the
-    // direction the player is moving along the link (the original's
-    // `newPosition - previousPosition`)
-    const size_t n = g.xz.size() / 2;
-    double tx = g.xz[2 * (n - 1)] - g.xz[0];
-    double tz = g.xz[2 * (n - 1) + 1] - g.xz[1];
-    const double tl = std::sqrt(tx * tx + tz * tz);
-    if (tl > 1e-6) { tx /= tl; tz /= tl; }
-    if (node == g.nodeA) { tx = -tx; tz = -tz; }   // leaving nodeA into the link
-    if (bestS < lastRoadArc_) { tx = -tx; tz = -tz; }
-    lastRoadArc_ = bestS;
+    // Preserve the complete position difference, not a signed tangent:
+    // BASE01LEFT/BASE02RIGHT/BASE07RIGHT explicitly require a transverse
+    // component at their authored road position. The port does not yet
+    // implement the original PositionId -> position resolver (0x435bf0).
     lastRoadNode_ = node;
-    mx = tx;
-    mz = tz;
+    mx = havePrev_?st.px-prevX_:0;
+    mz = havePrev_?st.pz-prevZ_:0;
     ++roadPasses_;
     return node;
 }
@@ -243,42 +298,41 @@ void ScriptRuntime::updateNodeEvents(const ScriptWorldState& st) {
     // 1. the pass set for this frame: the explicit queue plus either the
     //    engine's road-position rule (when the .way network was fed) or the
     //    nearest-node-within-passRadius stand-in.
-    std::vector<std::string> passed = passQueue_;
+    const double travelX=st.havePosition&&havePrev_?st.px-prevX_:0;
+    const double travelZ=st.havePosition&&havePrev_?st.pz-prevZ_:0;
+    std::map<std::string,std::pair<double,double>> passed;
+    for(const auto& n:passQueue_)passed[n]={travelX,travelZ};
     passQueue_.clear();
     double mx = 0, mz = 0;
-    bool haveDir = false;
     if (!roadSegs_.empty()) {
         std::string n = roadPass(st, mx, mz);
-        if (!n.empty()) { passed.push_back(n); haveDir = true; }
-        if (st.havePosition) { prevX_ = st.px; prevZ_ = st.pz; havePrev_ = true; }
+        if (!n.empty()) {
+            passed.emplace(n,std::make_pair(mx,mz));
+            // Multiple script markers can name the very same authored road
+            // position; do not silently discard all but the first RNOD.
+            for(const auto& alias:roadAliases_[n])passed.emplace(alias,std::make_pair(mx,mz));
+        }
     } else if (st.havePosition && !nodes_.empty()) {
         const ScriptNodePos* best = nullptr;
         double bd = passRadius_;
         for (const auto& n : nodes_) {
-            double d = distTo(n.x, n.z, st);
+            double d = distTo(n.x, n.z, st, n.y);
             if (d <= bd) { bd = d; best = &n; }
         }
-        if (best && best->name != lastNode_) { passed.push_back(best->name); ++radiusPasses_; }
+        if (best && best->name != lastNode_) { passed.emplace(best->name,std::make_pair(travelX,travelZ)); ++radiusPasses_; }
         lastNode_ = best ? best->name : std::string();   // left the node again
     }
-    // 2. the travel direction of this frame (king.exe subtracts the previous
-    //    from the current position before calling onNodePass, 0x43e7de)
-    if (!haveDir) {
-        if (st.havePosition && havePrev_) {
-            mx = st.px - prevX_;
-            mz = st.pz - prevZ_;
-        }
-        if (st.havePosition) { prevX_ = st.px; prevZ_ = st.pz; havePrev_ = true; }
-    }
+    // Update previous position once, after every pass captured its direction.
+    if(st.havePosition) { prevX_=st.px;prevZ_=st.pz;havePrev_=true; }
+    else { havePrev_=false;lastNode_.clear();lastRoadNode_.clear(); }
 
     for (auto& s : events_) {
         s.fired = false;
         s.satisfied = false;
         if (!s.active) continue;
         const GameData::NodeEvent& e = *s.def;
-        bool hit = false;
-        for (const auto& n : passed) if (n == e.wayNode) { hit = true; break; }
-        if (!hit) continue;
+        const auto hit=passed.find(e.wayNode);
+        if(hit==passed.end())continue;
         if (e.kindFlag & 0x10) {
             // STATEBORDER: handled *before* the direction/cooldown test
             // (0x40b1a4..0x40b1b7) - it updates the player's region.
@@ -289,7 +343,7 @@ void ScriptRuntime::updateNodeEvents(const ScriptWorldState& st) {
             borders_.push_back(&s);
             continue;
         }
-        if (!passDirectionOk(e, mx, mz)) continue;
+        if (!passDirectionOk(e, hit->second.first, hit->second.second)) continue;
         if (!(st.time - s.lastFire > ScriptRules::kNodeEventCooldown)) continue;  // 0x40b2a9
         s.satisfied = true;
         s.fired = true;
@@ -304,7 +358,12 @@ void ScriptRuntime::updateNodeEvents(const ScriptWorldState& st) {
 // `obstacle` - king.exe ObstaclesTask @0x434f2d and 0x42b3a0
 // ---------------------------------------------------------------------------
 void ScriptRuntime::updateObstacles(const ScriptWorldState& st) {
-    if (obstacles_.empty()) return;
+    if (obstacles_.empty() || !st.havePosition) return;
+    const auto delay=[&]() {
+        return ScriptRules::kObstacleMinDelay+double(rnd()%uint32_t(
+            ScriptRules::kObstacleMaxDelay-ScriptRules::kObstacleMinDelay));
+    };
+    if(nextObstacleToggle_<0)nextObstacleToggle_=delay();
     if (st.time < nextObstacleToggle_) return;
     // pick a candidate: at least 500 u from the closed one (0x64b860) and away
     // from the player (0x42b2d0); the engine tries up to 5 times.
@@ -314,21 +373,22 @@ void ScriptRuntime::updateObstacles(const ScriptWorldState& st) {
     for (int attempt = 0; attempt < 5; ++attempt) {
         const size_t pick = rnd() % obstacles_.size();
         ObstacleState& c = obstacles_[pick];
+        if(!c.havePos)continue;
         if (c.havePos) {
-            if (distTo(c.x, c.z, st) < ScriptRules::kObstaclePlayerAway) continue;
+            if (distTo(c.x, c.z, st, c.y) <= ScriptRules::kObstaclePlayerAway) continue;
             if (current < obstacles_.size() && obstacles_[current].havePos) {
                 double dx = c.x - obstacles_[current].x, dz = c.z - obstacles_[current].z;
-                if (std::sqrt(dx * dx + dz * dz) <= ScriptRules::kObstacleMinSeparation) continue;
+                const double dy=c.y-obstacles_[current].y;
+                if (std::sqrt(dx * dx + dz * dz + dy * dy) <= ScriptRules::kObstacleMinSeparation) continue;
             }
         }
-        for (auto& o : obstacles_) if (&o != &c) { if (o.closed) ++o.toggles; o.closed = false; }
+        for (auto& o : obstacles_) if (&o != &c) { if (o.closed) { ++o.toggles;o.changed=true; } o.closed = false; }
         c.closed = true;
+        c.changed=true;
         ++c.toggles;
         break;
     }
-    nextObstacleToggle_ = st.time + ScriptRules::kObstacleMinDelay +
-                          (double)(rnd() % (uint32_t)(ScriptRules::kObstacleMaxDelay -
-                                                      ScriptRules::kObstacleMinDelay + 1.0));
+    nextObstacleToggle_ = st.time + delay();
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +397,7 @@ void ScriptRuntime::updateObstacles(const ScriptWorldState& st) {
 void ScriptRuntime::updateAmbushes(const ScriptWorldState& st) {
     for (auto& a : ambushes_) {
         if (!a.havePos || !st.havePosition) continue;
-        const double d = distTo(a.x, a.z, st);
+        const double d = distTo(a.x, a.z, st, a.y);
         if (d > ScriptRules::kAmbushArmFar) { a.armed = true; a.active = false; a.satisfied = false; continue; }
         if (d < ScriptRules::kAmbushArmNear) { a.active = false; a.satisfied = false; continue; }
         a.satisfied = a.armed && !a.active;
@@ -351,6 +411,9 @@ void ScriptRuntime::updateAmbushes(const ScriptWorldState& st) {
 
 void ScriptRuntime::update(const ScriptWorldState& st) {
     clearPending();
+    for(auto& e:events_) { e.fired=false;e.satisfied=false; }
+    for(auto& o:obstacles_)o.changed=false;
+    for(auto& a:ambushes_)a.satisfied=false;
     if (st.paused) return;
     updateGates(st);
     updateNodeEvents(st);

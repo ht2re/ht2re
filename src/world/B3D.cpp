@@ -490,7 +490,7 @@ void B3D::buildScene() {
     buildFrom(roots, /*skipLinked=*/true);
 }
 
-bool B3D::buildNamedScene(const std::string& rootName) {
+bool B3D::buildNamedScene(const std::string& rootName, int bodyState) {
     sceneName_ = rootName;
     std::vector<const Node*> roots;
     for (auto& n : topNodes)
@@ -500,11 +500,11 @@ bool B3D::buildNamedScene(const std::string& rootName) {
         subs.clear();
         return false;
     }
-    buildFrom(roots, /*skipLinked=*/false);
+    buildFrom(roots, /*skipLinked=*/false, bodyState);
     return !subs.empty();
 }
 
-void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked) {
+void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked, int bodyState) {
     subs.clear();
     usedAnchors.clear();
     bbMin[0] = bbMin[1] = bbMin[2] = 1e30f;
@@ -568,6 +568,7 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked) {
     struct Walker {
         B3D* self;
         bool skipLinked;
+        int selectedBody;
         int instances = 0;
         std::vector<std::pair<std::string, std::string>> emitted;   // (target, anchor)
 
@@ -576,17 +577,38 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked) {
         }
 
         void go(const Node& n, int curMesh, const XForm& xf, int depth,
-                const std::string& group = std::string()) {
+                const std::string& group = std::string(), int body = -1, int tyre = -1) {
             // a subtag-21 record is a "key" node: everything below it can be
             // toggled by the scripts (people by day, roadworks, floods, ...)
             const std::string grp = (n.subtag == 21 && !n.name.empty()) ? n.name : group;
             if (depth > 8) return;                        // cycle / runaway guard
+            if (selectedBody >= 0 && n.subtag == 21 && !n.kids.empty()) {
+                if (n.name == "TestKey") return; // authoring helper, not vehicle geometry
+                if (n.name.find("Damage") != std::string::npos) {
+                    const bool wheel = n.name.find("Wheel") != std::string::npos;
+                    const int state = wheel ? 0 : std::min(selectedBody, (int)n.kids.size() - 1);
+                    go(n.kids[(size_t)state], curMesh, xf, depth, grp,
+                       wheel ? body : state, wheel ? state : tyre);
+                    return;
+                }
+                // These children are alternative LODs, not cumulative parts.
+                if (n.name == "refer_GeometryKey") {
+                    const Node* lod = nullptr;
+                    float nearest = 1e30f;
+                    for (const auto& child : n.kids)
+                        if (child.subtag == 10 && child.params.size() >= 8) {
+                            const float distance = bitsToFloat(child.params[7]);
+                            if (distance < nearest) { nearest = distance; lod = &child; }
+                        }
+                    if (lod) { go(*lod, curMesh, xf, depth, grp, body, tyre); return; }
+                }
+            }
             if (!n.name.empty() && skipLinked && depth == 0 && isLinkedTarget(n.name))
                 return;                                   // drawn at its anchors instead
             if (n.name.rfind("hit_", 0) == 0 && depth == 0)
                 return;                                   // collision-only geometry
             if (n.meshIndex >= 0) curMesh = n.meshIndex;
-            if (n.faceIndex >= 0 && curMesh >= 0) emit(curMesh, n.faceIndex, n.name, xf, grp);
+            if (n.faceIndex >= 0 && curMesh >= 0) emit(curMesh, n.faceIndex, n.name, xf, grp, body, tyre);
 
             if (n.subtag == 18 && n.params.size() >= 20) {
                 // "link": include the named container.  With an anchor name it is
@@ -626,15 +648,18 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked) {
                         if (!seen) self->usedAnchors.push_back(from);
                     }
                     ++instances;
-                    go(*ib->second, -1, comb, depth + 1, grp);
+                    go(*ib->second, -1, comb, depth + 1, grp, body, tyre);
                 }
                 return;
             }
-            for (auto& k : n.kids) go(k, curMesh, xf, depth, grp);
+            for (auto& k : n.kids) {
+                if (selectedBody >= 0 && n.subtag == 10 && k.subtag == 10) continue;
+                go(k, curMesh, xf, depth, grp, body, tyre);
+            }
         }
 
         void emit(int mi, int fi, const std::string& nodeName, const XForm& xf,
-                  const std::string& group) {
+                  const std::string& group, int body, int tyre) {
             Mesh& m = self->meshList[mi];
             const Face& f = self->faceList[fi];
             std::vector<uint32_t> mats;
@@ -647,6 +672,8 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked) {
                 SubMesh sm;
                 sm.name = nodeName.empty() ? m.name : nodeName;
                 sm.group = group;
+                sm.damageState = body;
+                sm.tyreState = tyre;
                 sm.materialIndex = mat;
                 if (mat < self->nameTable.size()) sm.material = self->nameTable[mat];
                 std::vector<uint32_t> remap((size_t)m.vcount, 0xFFFFFFFFu);
@@ -697,7 +724,7 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked) {
                 self->subs.push_back(std::move(sm));
             }
         }
-    } w{this, skipLinked};
+    } w{this, skipLinked, bodyState};
     XForm ident;
     for (const Node* n : roots) w.go(*n, -1, ident, 0);
 

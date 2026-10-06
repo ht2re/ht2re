@@ -228,6 +228,19 @@ void Vehicle::reset(float x, float z, float yawDeg) {
     // makes the tile-asphalt tier pick the wrong surface and the first frames
     // then correct by metres (a 30-degree pitch spike at spawn).
     float ref = ground ? ground->heightAt(x, z, 0.0f) : 0.0f;
+    if (ground) {
+        // Spawn/teleport has no previous contact height. Seed from a containing
+        // authored surface, not the coarse underlay, before continuity gates.
+        std::vector<float> layers;
+        ground->roadSurface().surfacesAt(x, z, 0, layers);
+        if (layers.empty()) ground->groundSurface().surfacesAt(x, z, 0, layers);
+        if (!layers.empty()) {
+            float best = layers.front();
+            for (float h : layers)
+                if (std::fabs(h-ref) < std::fabs(best-ref)) best = h;
+            ref = best;
+        }
+    }
     heightRef = ref;
     y_ = surfaceY(x, z, ref) + RIDE_HEIGHT;
     pitch_ = roll_ = 0;
@@ -464,6 +477,10 @@ void Vehicle::update(const Input& in, float dt) {
         // wall here and stop the truck at the end of the `.way` data.
         float cur = surfaceY(x_, z_, y_ - RIDE_HEIGHT);
         float nxt = surfaceY(x_ + dx, z_ + dz, cur);
+        if (getenv("HT2_RIDE_DEBUG") &&
+            (nxt-cur>climbLimit || cur-nxt>dropLimit || ground->waterAt(x_+dx,z_+dz,nxt)))
+            LOG("ride-block: pos %.3f %.3f body %.3f move %.4f %.4f support %.3f -> %.3f water %d",
+                x_,z_,y_,dx,dz,cur,nxt,ground->waterAt(x_+dx,z_+dz,nxt)?1:0);
         if (nxt - cur > climbLimit) {
             blocked_ = true;
             dx = dz = 0;
@@ -515,12 +532,19 @@ void Vehicle::update(const Input& in, float dt) {
     if (ground) {
         float h = surfaceY(x_, z_, y_ - RIDE_HEIGHT);
         heightRef = h;
+        auto contactY = [&](float x,float z) {
+            const float contact=surfaceY(x,z,h);
+            // A nearby cliff/deck cannot become this wheel's support merely
+            // because its projection contains the wheel. It is an obstacle,
+            // not a reason to rotate the chassis toward another vertical tier.
+            return std::fabs(contact-h)>climbLimit ? h : contact;
+        };
         // sample the ground at the four wheel contact points for pitch/roll
-        float hf = surfaceY(x_ + fx * WHEELBASE * 0.5f, z_ + fz * WHEELBASE * 0.5f, h);
-        float hr = surfaceY(x_ - fx * WHEELBASE * 0.5f, z_ - fz * WHEELBASE * 0.5f, h);
+        float hf = contactY(x_ + fx * WHEELBASE * 0.5f, z_ + fz * WHEELBASE * 0.5f);
+        float hr = contactY(x_ - fx * WHEELBASE * 0.5f, z_ - fz * WHEELBASE * 0.5f);
         float lx = -fz, lz = fx;                  // left vector
-        float hl = surfaceY(x_ + lx * TRACK * 0.5f, z_ + lz * TRACK * 0.5f, h);
-        float hr2 = surfaceY(x_ - lx * TRACK * 0.5f, z_ - lz * TRACK * 0.5f, h);
+        float hl = contactY(x_ + lx * TRACK * 0.5f, z_ + lz * TRACK * 0.5f);
+        float hr2 = contactY(x_ - lx * TRACK * 0.5f, z_ - lz * TRACK * 0.5f);
         float targetY = h + RIDE_HEIGHT;
         // Smooth the vertical so bumps do not teleport the body, and rate-limit
         // the target itself: the `.way` road network stops short of a few
@@ -534,6 +558,9 @@ void Vehicle::update(const Input& in, float dt) {
             if (step > maxD) step = maxD;
             if (step < -maxD) step = -maxD;
             y_ += step;
+            // Smooth settling, never penetration: climbing a solid triangle
+            // cannot leave the chassis below the newly reached contact plane.
+            if (y_ < targetY) y_ = targetY;
         }
         float targetPitch = atan2f(hf - hr, WHEELBASE) * 180.0f / PI;
         float targetRoll = atan2f(hr2 - hl, TRACK) * 180.0f / PI;

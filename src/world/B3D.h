@@ -70,6 +70,7 @@ public:
         // of these groups (people/cows by day, roadworks, floods, ...).  Empty
         // means "always drawn".
         std::string group;
+        int damageState = -1, tyreState = -1; // selected vehicle alternatives; -1 = raw scene
         uint32_t materialIndex = 0;
         float center[3] = {0, 0, 0};
         float radius = 0;
@@ -108,7 +109,12 @@ public:
     void buildScene();
     // One top-level container only (a vehicle: TRUCKS.B3D "<Model>"), following
     // its link records into the shared part containers.
-    bool buildNamedScene(const std::string& rootName);
+    bool buildNamedScene(const std::string& rootName, int bodyState = -1);
+    // Game vehicles select one damage state and intact tyres. Raw named scenes
+    // remain available to the editor/cockpit without filtering alternatives.
+    bool buildVehicleScene(const std::string& rootName, int bodyState = 0) {
+        return buildNamedScene(rootName, bodyState < 0 ? 0 : bodyState);
+    }
     const std::string& sceneName() const { return sceneName_; }
     // Count of records per subtag (validation aid).
     std::vector<uint32_t> subtagHistogram() const;
@@ -132,7 +138,7 @@ private:
     std::map<std::string, std::vector<std::string>> links;
     std::map<std::string, const Node*> nodeIndex;   // name -> node (for link targets)
     std::string sceneName_;
-    void buildFrom(const std::vector<const Node*>& roots, bool skipLinked);
+    void buildFrom(const std::vector<const Node*>& roots, bool skipLinked, int bodyState = -1);
 
     uint32_t u32(size_t p) const;
     bool known(uint32_t v) const;

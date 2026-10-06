@@ -336,6 +336,8 @@ private:
     std::vector<int> trafficIntact_, trafficDamaged_;
     // Car::damage at which the dented skin is drawn.
     static constexpr float kDamageSkin = 0.35f;
+    int playerVisualState_ = 0;
+    void refreshPlayerVisual();
     Traffic traffic_;
     Collision collision_;
     void drawTraffic(float cx, float cy, float cz, float yaw, float pitch);

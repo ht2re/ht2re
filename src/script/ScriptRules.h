@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include "GameData.h"
+#include "../world/Way.h"
 
 namespace ht2 {
 
@@ -15,8 +16,9 @@ namespace ht2 {
 // were recovered from original/king.exe (addresses in docs/script_gameplay.md):
 //
 //   `people` gate kinds       0x411f14..0x412077   (1/2/3/4 = UNCONDITIONAL /
-//                             DAYONLY / GOODWEATHER / DAYGW), evaluated every
-//                             frame at 0x42ac83..0x42ae69 with the jump table
+//                             DAYONLY / GOODWEATHER / DAYGW), evaluated on
+//                             module load at 0x42ac83..0x42ae69 (entry 0x42aba0),
+//                             with the jump table
 //                             at 0x42b050; visibility = condition &&
 //                             rand()/1e6 < prob.
 //   day window                0x484040  = 8.0 < hour < 21.0
@@ -29,7 +31,7 @@ namespace ht2 {
 //                             |now - lastShown| > 8.0 (0x64b698)
 //   obstacle scheduler        0x434f2d ObstaclesTask, every 600..900 ticks;
 //                             activation at 0x42b454..0x42b4a6 needs the new
-//                             obstacle >= 500 u (0x64b860) from the active one
+//                             obstacle > 500 u (0x64b860) from the active one
 //                             and away from the player (0x42b2d0)
 //   ambush band               0x42b550: arms between 250 u (0x64b868) and
 //                             600 u (0x64b870); 0x42b4c0 disarms beyond 600 u
@@ -55,6 +57,7 @@ struct ScriptRules {
     static constexpr double kObstaclePlayerAway = 500.0;      // 0x64b860 / 0x42b33a
     static constexpr double kObstacleMinDelay = 600.0;       // 0x434f8a/0x434f92
     static constexpr double kObstacleMaxDelay = 900.0;
+    // Exclusive upper bound: king.exe 0x434f83..0x434f8c uses 600 + rand()%300.
     // not in king.exe: how near the player must be to a .way node for its
     // `nodeevent` to count as "passed" **when no road network has been fed**
     // (see ScriptRuntime::setRoadSegments for the engine's own rule).
@@ -96,11 +99,13 @@ struct ScriptWorldState {
     long money = 0;           // the player's cash (tuning/upgrade gating)
     float damage = 0.0f;      // 0..1 (service/repair gating)
     double px = 0.0, pz = 0.0;// player world position (x, z)
+    double py = 0.0;
+    bool haveHeight = false;  // legacy 2-D probes may omit height
     bool havePosition = true;
     bool paused = false;      // a menu/time-stop freezes the world
 };
 
-struct ScriptNodePos { std::string name; double x = 0.0, z = 0.0; };
+struct ScriptNodePos { std::string name; double x = 0.0, z = 0.0, y = 0.0; };
 
 // One `.way` RSEG road link, as the node-pass rule needs it: the polyline
 // (x, z pairs), the RSEG width and the names of the `.way` nodes at its two
@@ -109,15 +114,23 @@ struct ScriptRoadSeg {
     std::string nodeA, nodeB;
     double width = 8.0;                 // RSEG WDTH
     std::vector<double> xz;             // x0,z0,x1,z1,...
+    std::vector<double> heights;
+    double widthEnd = 0.0;
+    std::vector<std::string> aliasesA, aliasesB; // coincident authored RNOD names
 };
+// Resolve actual RNODs, including named interior VDAT vertices, without
+// manufacturing endpoints for off-road markers. Shared by App and tests.
+std::vector<ScriptRoadSeg> scriptRoadSegments(const std::vector<Way::Seg>& segs,
+                                            const std::vector<ScriptNodePos>& nodes);
 
 // Per-instance runtime state (the `active / satisfied / fired` counters of the
 // `--script-report`).
 struct GateState {
     const GameData::Gate* def = nullptr;
     bool satisfied = false;   // the day/weather condition holds
-    bool visible = false;     // satisfied && the activation-edge probability roll
+    bool visible = false;     // condition and probability sampled on module load
     uint64_t rolls = 0;
+    bool loaded = false;
 };
 
 struct NodeEventState {
@@ -135,6 +148,8 @@ struct ObstacleState {
     int toggles = 0;
     double x = 0, z = 0;
     bool havePos = false;
+    double y = 0;
+    bool changed = false;     // transition this frame (message/UI delivery)
 };
 
 struct AmbushState {
@@ -145,6 +160,7 @@ struct AmbushState {
     int fires = 0;
     double x = 0, z = 0;
     bool havePos = false;
+    double y = 0;
 };
 
 // Per-family "how much of the shipped data is actually being executed".
@@ -180,9 +196,9 @@ public:
     void setNodePositions(const std::vector<ScriptNodePos>& nodes);
     const ScriptNodePos* nodePos(const std::string& name) const;
     // The road network (every RSEG of every loaded tile).  When it is fed, the
-    // node-pass trigger becomes the engine's rule (see updateNodeEvents): the
+    // node-pass trigger uses a road-position approximation (see updateNodeEvents): the
     // player "passes" the .way node at the end of the road link they are
-    // driving on, exactly like the original's road PositionId (king.exe
+    // driving on, inspired by the original's road PositionId (king.exe
     // 0x43e770 compares the new PositionId with the previous one and 0x43e822
     // calls onNodePass).  Without it the 20 u radius stand-in is used.
     void setRoadSegments(const std::vector<ScriptRoadSeg>& segs);
@@ -192,6 +208,7 @@ public:
     // how many passes the road rule produced (diagnostics / --script-report)
     size_t roadPasses() const { return roadPasses_; }
     size_t radiusPasses() const { return radiusPasses_; }
+    double nextObstacleToggleTime() const { return nextObstacleToggle_; }
 
     // Feed an explicit node pass (the App already resolves the nearest .way
     // node).  Cheap; can be called in addition to the position-driven pass.
@@ -206,6 +223,9 @@ public:
     // One frame.  Evaluates every condition family, advances the timers and
     // fills the coverage counters.
     void update(const ScriptWorldState& st);
+    // king.exe onModuleLoadX (0x42aba0), called at 0x56dfef. Only this
+    // module's people groups are sampled. Reload explicitly resamples them.
+    void onModuleLoad(const std::string& module, const ScriptWorldState& st);
 
     // node events whose message should be shown this frame
     const std::vector<const NodeEventState*>& pendingMessages() const { return pending_; }
@@ -255,7 +275,7 @@ private:
     void updateObstacles(const ScriptWorldState&);
     void updateAmbushes(const ScriptWorldState&);
     bool passDirectionOk(const GameData::NodeEvent& e, double mx, double mz) const;
-    double distTo(double x, double z, const ScriptWorldState&) const;
+    double distTo(double x, double z, const ScriptWorldState&, double y = 0) const;
     uint32_t rnd();
     // the engine's node-pass rule; returns the node the player moved onto (or
     // ""), and fills the travel vector the original derives from the two road
@@ -279,10 +299,10 @@ private:
     double passRadius_ = ScriptRules::kNodePassRadius;
     std::vector<ScriptRoadSeg> roadSegs_;
     std::string lastRoadNode_;
-    double lastRoadArc_ = 0.0;
+    std::map<std::string,std::vector<std::string>> roadAliases_;
     size_t roadPasses_ = 0, radiusPasses_ = 0;
     double badnessProbe_[3] = {0.35, 0.0, 0.0};
-    double nextObstacleToggle_ = ScriptRules::kObstacleMinDelay;
+    double nextObstacleToggle_ = -1.0; // initial delay sampled after seeding
     uint32_t rng_ = 0x12345678u;
     ScriptCoverage cov_;
 };

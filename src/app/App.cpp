@@ -20,10 +20,8 @@
 
 namespace ht2 {
 
-// defined below: puts a model's lowest vertex on the ground, and the
-// intact/dented material split of a vehicle container (see below).
+// Defined below: puts a model's lowest selected vertex on the ground.
 static float modelGroundOffset(const std::vector<B3D::SubMesh>& subs);
-static void dropDamagedParts(std::vector<B3D::SubMesh>& subs);
 
 static const float PI = 3.14159265358979f;
 
@@ -79,11 +77,8 @@ int App::run(const Options& o) {
         // --overlay: editor anchor edits are part of the model, so they must be
         // in place before the named scene places its linked part containers.
         if (haveTrucks_) overlay_.applyAnchors(trucks_, opt_.vehicle);
-        if (haveTrucks_ && !trucks_.buildNamedScene(opt_.vehicle))
+        if (haveTrucks_ && !trucks_.buildVehicleScene(opt_.vehicle))
             LOG("app: vehicle '%s' not found in TRUCKS.B3D", opt_.vehicle.c_str());
-        // The container carries the dented skin as well; the player's truck is
-        // drawn intact (its progressive damage skin is not wired to the model).
-        if (haveTrucks_) dropDamagedParts(trucks_.submeshesMutable());
         // --overlay: part visibility + material swaps, after the assembly.
         if (haveTrucks_) overlay_.applyParts(trucks_.submeshesMutable(), opt_.vehicle);
     }
@@ -748,9 +743,7 @@ void App::spawnParkedVehicles() {
             if (radius > 0.0f && ddx * ddx + ddz * ddz > radius * radius) { ++far; continue; }
             if (opt_.parkedMax > 0 && (int)spawned >= opt_.parkedMax) break;
             const GameData::ParkedDef& def = gameData_.parked[pick++ % gameData_.parked.size()];
-            if (!parked_.buildNamedScene(def.model)) continue;
-            { std::vector<B3D::SubMesh> subs = parked_.submeshes(); dropDamagedParts(subs);
-              parked_.submeshesMutable().swap(subs); }
+            if (!parked_.buildVehicleScene(def.model)) continue;
             const float px = (float)it->second.pos.x;
             const float pz = (float)it->second.pos.z;
             // The bay node's own height is the `.way` road height and matches the
@@ -827,44 +820,17 @@ static float modelGroundOffset(const std::vector<B3D::SubMesh>& subs) {
     return (lo < 1e29f) ? -lo : 0.0f;
 }
 
-// Damage in COMMON/TRUCKS.B3D is a *material* swap, not a different container:
-// every body panel exists twice inside one vehicle container -- the intact skin
-// ("Fiat_all1", "BMW_all1", "volga_all2", ...) and the dented one
-// ("Fiat_alld1", "BMW_alld1", ...) -- plus a few damaged-only parts such as
-// "common_BackLightsDmg".  B3D::buildNamedScene() includes *everything*, so an
-// undamaged car drew both skins on top of each other and looked pre-wrecked.
-// The materials are split here; the app uploads one batch per skin and picks it
-// from Car::damage (0 = intact), and the player/parked vehicles keep the intact
-// one only.
-static std::string lowerMat(const std::string& s) {
-    std::string r = s;
-    for (char& c : r)
-        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-    return r;
-}
-static bool damagedMaterial(const std::string& m) {
-    const std::string l = lowerMat(m);
-    if (l.find("alld") != std::string::npos) return true;     // Fiat_alld1, BMW_alld1
-    if (l.find("damage") != std::string::npos) return true;   // Z_DAMAGE1..5
-    if (l.size() >= 3 && l.compare(l.size() - 3, 3, "dmg") == 0) return true;
-    return false;                                             // common_BackLightsDmg
-}
-// The intact body skin: the twin of the "alld" material.
-static bool intactSkinMaterial(const std::string& m) {
-    const std::string l = lowerMat(m);
-    return l.find("_all") != std::string::npos || l.rfind("all") == 0;
-}
-// Drop the damaged materials from a built scene (player, parked vehicles).
-static void dropDamagedParts(std::vector<B3D::SubMesh>& subs) {
-    size_t before = subs.size();
-    std::vector<B3D::SubMesh> keep;
-    keep.reserve(before);
-    for (auto& sm : subs)
-        if (!damagedMaterial(sm.material)) keep.push_back(std::move(sm));
-    subs.swap(keep);
-    if (before != subs.size())
-        LOG("traffic: dropped %zu damaged material submeshes of %zu",
-            before - subs.size(), before);
+// Body state is a geometry switch, not a material-name filter. Preserve the
+// port's existing damage threshold; tyre state stays intact until punctures
+// are separately modelled. A repair switches the body back on the next frame.
+void App::refreshPlayerVisual() {
+    if (!haveTrucks_) return;
+    const int state = vehicle3d_.damage() >= kDamageSkin ? 3 : 0;
+    if (state == playerVisualState_) return;
+    if (!trucks_.buildVehicleScene(opt_.vehicle, state)) return;
+    overlay_.applyParts(trucks_.submeshesMutable(), opt_.vehicle);
+    r_.setVehicleScene(&trucks_, &vehicleTex_);
+    playerVisualState_ = state;
 }
 
 // The car body for the contacts comes from the model's own bounding box:
@@ -895,10 +861,10 @@ static void modelBody(const std::vector<B3D::SubMesh>& subs, float& length, floa
 // king.exe calls onNodePass (file offset 0xb100 / VA 0x40b100) for a road
 // PositionId transition, filters the travel direction with a dot product and
 // suppresses a repeat for eight seconds.  ScriptRuntime owns that recovered
-// state machine; the small radius only maps our free-driving pose back to the
-// named .way node because this port does not expose a player PositionId yet.
+// state machine; the pose is projected onto actual RSEG links (including
+// named interior vertices and coincident RNOD aliases).
 void App::prepareNodeEvents() {
-    if (scriptRuntime_ || gameData_.nodeEvents.empty()) return;
+    if (scriptRuntime_) return;
     indexWayNodes();
     scriptRuntime_.reset(new ScriptRuntime(gameData_));
     scriptRuntime_->setNodePassRadius(std::max(0.0f, opt_.eventRadius));
@@ -906,15 +872,16 @@ void App::prepareNodeEvents() {
     std::vector<ScriptNodePos> nodes;
     nodes.reserve(wayNodes_.size());
     for (const auto& kv : wayNodes_)
-        nodes.push_back({kv.first, kv.second.pos.x, kv.second.pos.z});
+        nodes.push_back({kv.first, kv.second.pos.x, kv.second.pos.z, kv.second.pos.y});
     scriptRuntime_->setNodePositions(nodes);
+    scriptRuntime_->setRoadSegments(scriptRoadSegments(waySegs_,nodes));
 
     size_t resolved = 0;
     for (const auto& e : gameData_.nodeEvents)
         if (wayNodes_.find(e.wayNode) != wayNodes_.end()) ++resolved;
 
-    // The original passes the road-link direction even on the first position
-    // update.  Seed the equivalent previous sample one metre behind the truck.
+    // Seed the initial movement from the truck heading. This is a port
+    // approximation until the original PositionId resolver is implemented.
     float fx = 0.0f, fz = 1.0f;
     vehicle3d_.forward(fx, fz);
     scriptRuntime_->setPreviousPosition(vehicle3d_.x() - fx, vehicle3d_.z() - fz);
@@ -938,8 +905,16 @@ void App::updateNodeEvents(float dt) {
     st.damage = vehicle3d_.damage();
     st.px = vehicle3d_.x();
     st.pz = vehicle3d_.z();
+    st.py = vehicle3d_.y()-Vehicle::RIDE_HEIGHT;
+    st.haveHeight = true;
     st.havePosition = true;
     scriptRuntime_->update(st);
+    for(const auto& obstacle:scriptRuntime_->obstacles()) {
+        if(!obstacle.changed)continue;
+        const auto& text=obstacle.closed?obstacle.def->msgClose:obstacle.def->msgOpen;
+        if(!text.empty())pushMessage(cp1251ToUtf8(text),"obstacle "+obstacle.def->id);
+        LOG("scripts: obstacle '%s' %s",obstacle.def->id.c_str(),obstacle.closed?"closed":"opened");
+    }
 
     for (const NodeEventState* fired : scriptRuntime_->pendingBorders()) {
         currentRegion_ = fired->def->id;
@@ -996,24 +971,14 @@ void App::spawnTraffic() {
     trafficDamaged_.clear();
     for (const char* model : wanted) {
         if ((int)ids.size() >= opt_.trafficModels) break;
-        if (!trafficB3d_.buildNamedScene(model)) continue;
+        if (!trafficB3d_.buildVehicleScene(model)) continue;
         float len = 4.5f, rad = 1.1f, off = 0.0f;
         modelBody(trafficB3d_.submeshes(), len, rad, off);
-        // Split the container into the intact skin, the dented skin and the
-        // parts both cars share (wheels, glass, engine, lights).
-        std::vector<B3D::SubMesh> common, skin, dents;
-        for (auto& sm : trafficB3d_.submeshes()) {
-            if (damagedMaterial(sm.material)) dents.push_back(sm);
-            else if (intactSkinMaterial(sm.material)) skin.push_back(sm);
-            else common.push_back(sm);
-        }
-        std::vector<B3D::SubMesh> intact = common;
-        intact.insert(intact.end(), skin.begin(), skin.end());
-        std::vector<B3D::SubMesh> wrecked = common;
-        wrecked.insert(wrecked.end(), dents.begin(), dents.end());
+        const std::vector<B3D::SubMesh> intact = trafficB3d_.submeshes();
+        trafficB3d_.buildVehicleScene(model, 3);
+        const std::vector<B3D::SubMesh> wrecked = trafficB3d_.submeshes();
         const int idIntact = r_.addTrafficModel(intact, &vehicleTex_);
-        const int idDented = dents.empty() ? idIntact
-                                           : r_.addTrafficModel(wrecked, &vehicleTex_);
+        const int idDented = r_.addTrafficModel(wrecked, &vehicleTex_);
         if (idIntact >= 0) {
             ids.push_back((int)ids.size());           // model *index*, not batch id
             trafficYOff_.push_back(off);
@@ -1026,9 +991,9 @@ void App::spawnTraffic() {
                       freight = true;
               traffic_.setFreightModel((int)ids.size() - 1, freight);
             LOG("traffic: model %-10s body %.2f x %.2f m, ground offset %.2f, "
-                "skin %zu/%zu tris (intact/dented)",
+                "geometry %zu/%zu submeshes (intact/dented)",
                 model, (double)len, (double)(2.0f * rad), (double)off,
-                (size_t)(skin.size()), (size_t)(dents.size()));
+                intact.size(), wrecked.size());
         }
     }
     if (ids.empty()) { LOG("traffic: no models available"); return; }
@@ -1344,11 +1309,12 @@ void App::initEconomy() {
 
 bool App::switchPlayerVehicle(const std::string& model) {
     if (model.empty() || !haveTrucks_) return false;
-    if (!trucks_.buildNamedScene(model)) {
+    if (!trucks_.buildVehicleScene(model)) {
         LOG("economy: model '%s' not in TRUCKS.B3D", model.c_str());
         return false;
     }
     r_.setVehicleScene(&trucks_, &vehicleTex_);
+    playerVisualState_ = 0;
     cockpit_.load(r_, opt_.dataDir, model);      // rebind the instruments (no-op if same brand)
     mirror_.load(r_, opt_.dataDir, &trucks_.anchorList, model);   // rebind the mirror mount
     vehicle3d_.useVehicle(model);
@@ -1641,7 +1607,7 @@ void App::updateAmbushes() {
         std::vector<B3D::SubMesh> extra;
         int spawned = 0;
         for (int i = 0; i < a.cars; ++i) {
-            if (!parked_.buildNamedScene(model)) break;
+            if (!parked_.buildVehicleScene(model)) break;
             float side = ((float)i - (a.cars - 1) * 0.5f) * 3.6f;      // spread across
             float yaw = baseYaw + 1.5707963f;                           // across the road
             float cs = cosf(yaw), sn = sinf(yaw);
@@ -1708,7 +1674,7 @@ static float trand(uint32_t& s) {
 // (and weather); `obstacle` keys use the same mechanism for road closures.
 // ---------------------------------------------------------------------------
 void App::updateGates() {
-    if (gameData_.gates.empty()) return;
+    if (worldMeshes_.empty()) return;
     if (!gatesBuilt_) {
         size_t gated = 0;
         for (const auto& sm : worldMeshes_) if (!sm.group.empty()) ++gated;
@@ -1949,7 +1915,7 @@ bool App::loadData() {
         // --overlay: the same anchor-before / parts-after rule as the world path.
         if (haveTrucks_) {
             overlay_.applyAnchors(trucks_, opt_.vehicle);
-            trucks_.buildNamedScene(opt_.vehicle);
+            trucks_.buildVehicleScene(opt_.vehicle);
             overlay_.applyParts(trucks_.submeshesMutable(), opt_.vehicle);
         }
     } else if (opt_.scene == "world" || opt_.trafficReport > 0.0f) {
@@ -2842,7 +2808,7 @@ void App::enterWorld() {
         if (haveTrucks_) {
             // --overlay: anchors before the assembly, parts after it.
             overlay_.applyAnchors(trucks_, opt_.vehicle);
-            trucks_.buildNamedScene(opt_.vehicle);
+            trucks_.buildVehicleScene(opt_.vehicle);
             overlay_.applyParts(trucks_.submeshesMutable(), opt_.vehicle);
         }
     }
@@ -3221,6 +3187,7 @@ void App::drawWorld(float dt, bool interactive) {
     float fx, fz;
     vehicle3d_.forward(fx, fz);
 
+    refreshPlayerVisual();
     if (opt_.camGiven) {
         // free camera (debug / deterministic screenshots)
         r_.drawSky(worldCam_[4]);
@@ -3750,7 +3717,7 @@ int App::roadProbeReport() {
 
     // How many samples have a *reference road surface* under the wheels and how
     // far the drawn height is from it.
-    size_t srcCount[3] = {0, 0, 0};   // 0 = terrain, 1 = .way, 2 = tile asphalt
+    size_t srcCount[4] = {};   // coarse / .way / asphalt / authored ground
     size_t noTileRoad = 0;            // columns with no tile road triangle
     ProbeHist drawErr;        // graph height - nearest surface (any window)
     ProbeHist drawRoad;       // graph height - nearest ASPHALT surface (any window)
@@ -3812,7 +3779,7 @@ int App::roadProbeReport() {
                 int src = 0;
                 ground_.drivableY(x, z, h, &src, nullptr);
                 if (src < 0) src = 0;
-                if (src > 2) src = 2;
+                if (src > 3) src = 0;
                 ++srcCount[src];
                 float ty = 0.0f, td = 0.0f;
                 bool vis = false;
@@ -3902,8 +3869,8 @@ int App::roadProbeReport() {
         }
     }
     LOG("road-probe: surface layers on the network: terrain %zu, .way profile %zu, "
-        "tile asphalt %zu of %zu; columns with no tile road triangle: %zu",
-        srcCount[0], srcCount[1], srcCount[2], samples, noTileRoad);
+        "tile asphalt %zu, authored ground %zu of %zu; columns with no tile road triangle: %zu",
+        srcCount[0], srcCount[1], srcCount[2], srcCount[3], samples, noTileRoad);
     // --- the tiles' own asphalt against the layered surface ------------------
     // Walk every carriageway triangle the tiles contain and ask the layered
     // surface at three points of it with the triangle's own height as the
@@ -3980,8 +3947,8 @@ int App::roadProbeReport() {
             pts, onNet, offNet, tileAns, tileAnsWrong, offNoLay, multi,
             closeErr.quantile(0.95f), closeErr.maxV, netErr.quantile(0.95f), netErr.maxV);
     }
-    LOG("road-probe: RESULT2 terrain=%zu way=%zu tile=%zu notile=%zu",
-        srcCount[0], srcCount[1], srcCount[2], noTileRoad);
+    LOG("road-probe: RESULT2 terrain=%zu way=%zu tile=%zu notile=%zu ground=%zu",
+        srcCount[0], srcCount[1], srcCount[2], noTileRoad, srcCount[3]);
     LOG("road-probe: RESULT samples=%zu skipped=%zu asphalt4=%zu noasphalt=%zu maxerr=%.3f "
         "meanerr=%+.3f p95err=%.3f err5=%zu err20=%zu asphaltmax=%.3f asphalt5=%zu "
         "mapmax=%.3f gapmin=%.3f gapmedian=%.3f gapsmall=%zu above=%zu junctions=%zu",
@@ -4040,7 +4007,7 @@ int App::trafficWheelProbe() {
         const float step1 = 1.0f / 60.0f;
         const int steps1 = std::max(1, (int)(opt_.trafficWheelProbe / step1));
         const float starts[2][3] = {{-3020.0f, -4625.0f, 0.0f}, {-3020.0f, -4560.0f, 0.0f}};
-        size_t layerN[3] = {0, 0, 0};
+        size_t layerN[4] = {};
         size_t layerPlayer = 0;
         float odo0 = vehicle3d_.odometer();
         // Drive it without world collisions: this phase measures the ride surface,
@@ -4060,14 +4027,14 @@ int App::trafficWheelProbe() {
                 ground_.drivableY(vehicle3d_.x(), vehicle3d_.z(),
                                   vehicle3d_.y() - Vehicle::RIDE_HEIGHT, &src, nullptr);
                 if (src < 0) src = 0;
-                if (src > 2) src = 2;
+                if (src > 3) src = 0;
                 ++layerN[src];
                 ++layerPlayer;
             }
         }
         LOG("traffic-wheel-probe: player route (2 starts): %zu frames, layers terrain %zu, "
-            ".way %zu, tile asphalt %zu, %.0f m driven",
-            layerPlayer, layerN[0], layerN[1], layerN[2], vehicle3d_.odometer() - odo0);
+            ".way %zu, tile asphalt %zu, authored ground %zu, %.0f m driven",
+            layerPlayer, layerN[0], layerN[1], layerN[2], layerN[3], vehicle3d_.odometer() - odo0);
         vehicle3d_.setCollision(&collision_);
         if (opt_.noCollision) vehicle3d_.setCollision(nullptr);
         LOG("traffic-wheel-probe: RESULT2 player_terrain=%zu player_way=%zu player_tile=%zu",
@@ -4079,7 +4046,7 @@ int App::trafficWheelProbe() {
     const int steps = std::max(1, (int)(opt_.trafficWheelProbe / step));
     ProbeHist all;
     size_t cars = 0, noAsphalt = 0, junctionSamples = 0, over5 = 0, over20 = 0;
-    size_t srcCount[3] = {0, 0, 0};
+    size_t srcCount[4] = {};
     float worstE = 0, worstX = 0, worstZ = 0;
     int worstN = 0;
     bool worstJunction = false;
@@ -4121,7 +4088,7 @@ int App::trafficWheelProbe() {
                         int src = 0;
                         ground_.drivableY(wx, wz, c.h, &src, nullptr);
                         if (src < 0) src = 0;
-                        if (src > 2) src = 2;
+                        if (src > 3) src = 0;
                         ++srcCount[src];
                     }
                     hist.add(e, wx, wz);
@@ -4153,7 +4120,7 @@ int App::trafficWheelProbe() {
         worstE, worstX, worstZ, worstJunction ? " (junction)" : "", worstN,
         worstX - worstWheelX, worstZ - worstWheelZ, worstGraph, worstSurf);
     LOG("traffic-wheel-probe: surface layers under the wheels: terrain %zu, .way %zu, "
-        "tile asphalt %zu", srcCount[0], srcCount[1], srcCount[2]);
+        "tile asphalt %zu, authored ground %zu", srcCount[0], srcCount[1], srcCount[2], srcCount[3]);
     LOG("traffic-wheel-probe: RESULT samples=%zu noasphalt=%zu mean=%.3f median=%.3f p95=%.3f "
         "max=%.3f over5=%zu over20=%zu junction=%zu worstx=%.0f worstz=%.0f",
         cars, noAsphalt, all.mean(), all.quantile(0.5f), all.quantile(0.95f), all.maxV,
@@ -4175,15 +4142,16 @@ int App::driveTest() {
     ProbeColumn pgrid;
     pgrid.build(worldMeshes_);
     ProbeHist *playerHist = nullptr, *playerOnRoad = nullptr;
-    ProbeHist hAll, hOnRoad;
+    ProbeHist hAll, hOnRoad, hFullRoad;
+    size_t mixedSupportFrames=0;
     playerHist = &hAll; playerOnRoad = &hOnRoad;
     size_t playerSamples = 0, playerNoAsphalt = 0;
     float playerWorst = 0, playerWorstX = 0, playerWorstZ = 0;
     bool playerWorstRoad = false;
     // Which layer the ride is on: 0 = terrain fallback, 1 = `.way` profile,
     // 2 = the tiles' own asphalt (src/world/RoadSurface.cpp).
-    size_t rideSrc[3] = {0, 0, 0};
-    float rideSrcMax[3] = {0, 0, 0};
+    size_t rideSrc[4] = {};
+    float rideSrcMax[4] = {};
     float pitchMax = 0, rollMax = 0;
     // Vertical continuity of the ride: the road profile the truck now follows is
     // quantised to the ground map's 12-unit cells, so a step at a cell border
@@ -4237,7 +4205,7 @@ int App::driveTest() {
                 ground_.drivableY(vehicle3d_.x(), vehicle3d_.z(), prevY - Vehicle::RIDE_HEIGHT,
                                   &src, nullptr);
                 if (src < 0) src = 0;
-                if (src > 2) src = 2;
+                if (src > 3) src = 0;
                 ++rideSrc[src];
             }
         }
@@ -4251,6 +4219,17 @@ int App::driveTest() {
                                     {vehicle3d_.x() + lx2 * ht, vehicle3d_.z() + lz2 * ht},
                                     {vehicle3d_.x() - lx2 * ht, vehicle3d_.z() - lz2 * ht}};
             const float plane = vehicle3d_.y() - Vehicle::RIDE_HEIGHT;
+            float roadY[4] = {};
+            bool fullRoad = true;
+            int centreSource=0;
+            ground_.drivableY(vehicle3d_.x(),vehicle3d_.z(),plane,&centreSource);
+            for(int w=0;w<4;++w) {
+                bool road=false;
+                if(!pgrid.nearest(wp[w][0],wp[w][1],plane,40,true,roadY[w],road))fullRoad=false;
+            }
+            fullRoad = fullRoad && centreSource==2;
+            if(fullRoad)for(float sy:roadY)hFullRoad.add(plane-sy,vehicle3d_.x(),vehicle3d_.z());
+            else ++mixedSupportFrames;
             for (int w = 0; w < 4; ++w) {
                 bool isRoad = false;
                 float sy = 0;
@@ -4266,7 +4245,7 @@ int App::driveTest() {
                     int src = 0;
                     ground_.drivableY(wp[w][0], wp[w][1], plane, &src, nullptr);
                     if (src < 0) src = 0;
-                    if (src > 2) src = 2;
+                    if (src > 3) src = 0;
                     rideSrcMax[src] = std::max(rideSrcMax[src], std::fabs(e));
                 }
                 ++playerSamples;
@@ -4297,13 +4276,15 @@ int App::driveTest() {
         playerOnRoad->maxV, maxStep);
     LOG("drive: player vertical step per frame: max %.3f m (the AI's road-profile limit "
         "is 0.50 m); pitch max %.2f deg, roll max %.2f deg", maxStep, pitchMax, rollMax);
+    LOG("drive: RESULT3 fully_asphalt_n=%zu max=%.3f p95=%.3f mixed_or_offroad_frames=%zu",
+        hFullRoad.n,hFullRoad.maxV,hFullRoad.quantile(.95f),mixedSupportFrames);
     LOG("drive: ride surface: terrain fallback %zu frames, .way profile %zu, tile asphalt %zu; "
         "max |wheel - asphalt| per layer: terrain %.3f m, .way %.3f m, tile %.3f m",
         rideSrc[0], rideSrc[1], rideSrc[2], rideSrcMax[0], rideSrcMax[1], rideSrcMax[2]);
     LOG("drive: RESULT2 ride_terrain=%zu ride_way=%zu ride_tile=%zu layer_max=%.3f/%.3f/%.3f "
-        "pitch=%.2f roll=%.2f",
+        "pitch=%.2f roll=%.2f ride_ground=%zu ground_max=%.3f",
         rideSrc[0], rideSrc[1], rideSrc[2], rideSrcMax[0], rideSrcMax[1], rideSrcMax[2],
-        pitchMax, rollMax);
+        pitchMax, rollMax, rideSrc[3], rideSrcMax[3]);
     if (audio_.ready())
         LOG("audio: engine loop after drive: %zu frames, %zu starts, pitch %.2f, gain %.2f",
             audio_.engineLoopFrames(), audio_.engineRestarts(),

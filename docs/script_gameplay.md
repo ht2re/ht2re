@@ -6,6 +6,39 @@ world** — the `node`, `nodeevent`, `ambush`, `obstacle`, `parking`, `service`,
 `trucks`/`cars` blocks, and their relationship to `ENV/<tile>.way` and `ENV/<tile>.b3d`.
 
 Everything below was derived by reading the shipped data, not from the original source.
+Later sections also use the shipped executable. The 2026-10-06 correction below
+supersedes historical wiring and per-frame `people` claims.
+
+### Runtime correction, 2026-10-06
+
+`0x42ac83..0x42ae69` belongs to **onModuleLoadX(char const * moduleName)**,
+whose entry is `0x42aba0` (debug string `0x66dc24`). The direct caller is
+`0x56dfef`; the gate loop filters the module name before its condition switch.
+This site does **not** prove a per-frame roll. `ScriptRuntime::onModuleLoad`
+now samples the matching module's day/weather condition and probability;
+ordinary frame updates preserve that snapshot. All static port modules are
+initialised once. Other original refresh/streaming paths and the original
+55-state random generator remain open; the port still uses its deterministic LCG.
+
+App now feeds actual `.way` RSEG links, including named interior vertices and
+coincident RNOD aliases. All 31 authored events bind and execute on authored
+geometry. Direction preserves the full movement vector, including transverse
+crossings required by BASE01LEFT/BASE02RIGHT/BASE07RIGHT;
+explicit passes retain their own movement vector. Overlapping endpoint zones
+select the nearest endpoint, and 3D height distinguishes overlapping levels.
+The 4 m projection guard is a port policy, not a recovered engine constant.
+This is not yet an exact implementation of every original PositionId transition.
+
+Paused frames clear transient event/message/obstacle pulses, not persistent
+state. Obstacle and ambush distances include height; unresolved positions are
+invalidated on rebinding. Obstacle selection rejects missing positions and
+distance <=500, and App delivers open/close messages. Initial and subsequent
+obstacle delays use 600 + rand()%300 (600..899), verified at 25 seeds and at
+the scheduled deadline. `script_runtime_test.cpp` passes 400 checks, in addition
+to the original 42-check harness, and
+adds execution regressions, including all 87 authored ambushes and 17 obstacles;
+ambush graph-hop guards, slot ids, missions and racing remain unverified.
+
 Claims are marked:
 
 * **[DATA]** — measured over all 46 scripts / 39 ENV tiles; the numbers are reproducible
@@ -2106,7 +2139,7 @@ that the engine qualifies the consumer as `GameData::…`).  The complete table:
 | form | field | what it is | before | after |
 |------|-------|------------|--------|-------|
 | `people` gate | head | `GOODWEATHER` is a real engine condition (king.exe `0x411fbc`) | dropped by the loader (only `DAY*`/`UNCONDITIONAL` accepted) | `Gate::kindId` 1..4, all four kinds |
-| `people` gate | 3 | probability | kept and rolled per frame, but with the App's own float RNG and `DAYGW` reduced to `day` (App.cpp) | rolled per frame with the engine's `rand()/1e6 < p` (`0x42adc2`) and the real day **and** weather test |
+| `people` gate | 3 | probability | ad-hoc frame RNG and `DAYGW` reduced to `day` | module-load snapshot using `rand()/1e6 < p` comparison (`0x42adc2`), real day **and** weather condition; port PRNG still differs |
 | `nodeevent` | 2 | `STATEBORDER` = bit `0x10`, `UNCONDITIONAL` = 0 | kind kept as a string only | `NodeEvent::kindFlag` |
 | `nodeevent` | 4 | `ALL/N/S/E/W` = the **travel direction** required | ignored (any approach fired) | `dirId` + compass vector, `dot(dir, move) > 0` |
 | `nodeevent` | (timer) | 8 s re-trigger guard on the event | none | `kNodeEventCooldown`, optional one-shot |
@@ -2161,19 +2194,21 @@ field is either data or a condition keyword.
 ### 10.2 `people` — the only condition form (4 kinds)
 
 Parser `0x411f14..0x412077`, gate object 0x30 bytes (`operator new` at `0x411ed7`), runtime
-evaluator `0x42ac83..0x42ae69` with the jump table at `0x42b050`.
+evaluator `0x42ac83..0x42ae69` inside `onModuleLoadX` (`0x42aba0`), with the
+jump table at `0x42b050`.
 
 | gate field | offset | meaning |
 |------------|--------|---------|
 | `+0x0c` | `int` | `-1`, or an index into the room table (`0x68d0c8`) |
 | `+0x10` | `std::string` | the `subtag 21` key name |
-| `+0x1c` | `bool` | **visible** this frame (written by the evaluator) |
+| `+0x1c` | `bool` | stored **visible** state (written on module load) |
 | `+0x20` | `int` | kind: **1 = UNCONDITIONAL, 2 = DAYONLY, 3 = GOODWEATHER, 4 = DAYGW** |
 | `+0x28` | `double` | probability |
 
 * `0x411f14` `UNCONDITIONAL` → `[+0x20] = 1`; `0x411f68` `DAYONLY` → 2; `0x411fbc`
   `GOODWEATHER` → 3; `0x41200d` `DAYGW` → 4.  Any other atom is an error (`0x41204e`).
-* The evaluator runs over **all** gates **every frame**:
+* On a module-load callback the evaluator scans the gates and updates only
+  those matching `moduleName` (`0x42acb7..0x42ad04`):
   * `0x42ae48` → `0x483c10` applies the new visibility to the mesh group.
   * kind 1 (`0x42ad18`): `visible = prob > rand()/1e6`
   * kind 2 (`0x42ad47`): `if (!isDay()) visible = 0; else visible = prob > rand()/1e6`
@@ -2213,8 +2248,9 @@ Runtime (`0x40b18e..0x40b2c7`):
    `dot = ev[8]*d.x + ev[0x10]*d.y + ev[0x18]*d.z` compared with `0.0` (`0x64b678`);
    `0x40b29d` skips the event unless `dot > 0` — i.e. the player must be **travelling along**
    the stored compass direction.
-3. Timer: `fabs(now - ev[+0x20]) > 8.0` (`0x64b698`) ⇒ skip (`0x40b2a9..0x40b2b4`), so the
-   same message is not repeated within 8 seconds.  On a fire, `now` is stored to `+0x20`
+3. Timer: only `fabs(now - ev[+0x20]) > 8.0` (`0x64b698`) permits a repeat
+   (`0x40b2a9..0x40b2b4`); the same message is not repeated within 8 seconds.
+   On a fire, `now` is stored to `+0x20`
    (`0x40b2c7`).
 4. The direction argument comes from `setPlayerPosition`:
    `0x43e7de..0x43e801` subtracts the previous from the current player position and passes
@@ -2223,7 +2259,7 @@ Runtime (`0x40b18e..0x40b2c7`):
 
 Consequences for a re-implementation: a `nodeevent` is **not** a radius trigger, it is a
 *node pass* with a travel-direction filter and an 8 s guard.  `src/script/ScriptRules.cpp`
-implements exactly that (`kNodeEventCooldown`, `passDirectionOk`, `passNode`, and an
+implements the direction/cooldown rules (`kNodeEventCooldown`, `passDirectionOk`, `passNode`, and an
 optional one-shot policy that the original does not have).
 
 Two deliberate divergences, both marked in the code:
@@ -2234,10 +2270,10 @@ Two deliberate divergences, both marked in the code:
   compare against whatever the 0x30-byte object's `+8..+0x20` happens to hold (zeroed
   allocation, or garbage) - certainly not a defined "any direction".  The safe reading is
   "no filter".
-* The engine keys the pass on the player's road `PositionId`; the re-implementation uses
-  "the nearest named `.way` node within `kNodePassRadius` (20 u), when that changes"
-  because `src/script` does not own the road graph.  `passNode(name)` is exposed so the App
-  can feed the real node id instead.
+* The engine keys the pass on the player's road `PositionId`; the port now projects
+  the pose onto RSEG links and selects named endpoint positions. This remains
+  approximate. The 20 u nearest-node stand-in is used only without a road
+  network. `passNode(name)` can feed an explicit pass.
 
 ### 10.4 `obstacle` — a road-closure scheduler
 
@@ -2250,7 +2286,7 @@ Two deliberate divergences, both marked in the code:
 | `0x42b060` | set the closed/open state (and the `b3d` key group visibility) |
 
 So: **at most one road closure is active world-wide**, it moves every 600–900 ticks, the new
-one must be ≥ 500 u from the old one and away from the player, and the `pos_work_*` nodes of
+one must be > 500 u from the old one and away from the player, and the `pos_work_*` nodes of
 field 9 are the repair sites tied to it.  `Obstacle::msgClose`/`msgOpen` (fields 7 and 8) are
 the strings to show when it closes/opens.
 
@@ -2364,13 +2400,13 @@ exits non-zero if any fails, so the first check subsumes all 27):
 
 `satisfied` is the *condition* count and is stable (66 = all four kinds at noon with clear
 weather; 5 = only `UNCONDITIONAL` at 23:00 or 06:00; 37 = 5 + 32 when the weather is bad).
-`visible`/`active` additionally contains the per-frame probability roll
-(`rand()/1e6 < prob`), so it fluctuates frame to frame - that is the engine's behaviour, not
-noise in the report.
+`visible` additionally contains the module-load probability roll
+(`rand()/1e6 < prob`). These condition counts describe loads at the stated
+time/weather, not automatic per-frame re-evaluation of already loaded groups.
 
 ---
 
-## 12. Wiring (not applied to `src/app/App.cpp` - other agents own it)
+## 12. Historical wiring notes (superseded by the 2026-10-06 runtime correction)
 
 `tools/script_report_wiring.diff` is a real unified diff (`git apply --check` clean) that
 adds `--script-report` / `--script-coverage`, the `Options` flags, the `ScriptRules.cpp`
@@ -2421,8 +2457,9 @@ for (const auto& o : scriptRules_->obstacles()) setObstacleClosed(o.def->key, o.
 4. **The `ambush` field-7 slot ids.**  Still not found as an index into anything shipped;
    the position comes from field 5, so they only matter as a car count.
 5. **`parking` field 6** (`Parking::size`): now kept, but no consumer was found.
-6. **Which `people` groups are re-rolled per frame vs. cached.**  `0x42ac83` re-rolls every
-   frame for every gate; whether the *renderer* fades a group in/out is not modelled.
+6. **Additional `people` refresh/streaming paths.** `0x42ac83` is inside
+   `onModuleLoadX`, not a frame callback (corrected 2026-10-06). Other refresh
+   paths and renderer transitions are not established.
 7. **The `weatherandtime` badness curve** (`0x5a9d40`) - only its threshold (0.2) and the
    `weather.ini` presets are known; `TRUCK.INI [EFFECTS] days=50 weats=60` are presumably
    the cycle lengths.
@@ -2494,10 +2531,11 @@ port the real `.way` RSEG links (`nodeA`, `nodeB`, `WDTH`, polyline) and the
 runtime reproduces that rule (`roadPass()`): the link the player is inside (its
 own `WDTH/2`, never the 20 u radius) decides which node they are on, the node
 fires when they reach the far end of the link, and the direction is the road
-tangent at that node signed by the direction of travel.  Driving 60 m aside is
+position difference (corrected 2026-10-06: a forced road tangent suppressed
+three authored transverse crossings). Driving 60 m aside is
 off-road and passes nothing.  Without a fed network the old
-`kNodePassRadius` stand-in is used, so nothing regresses before the App hunk
-below is applied.
+`kNodePassRadius` stand-in is used. The App connection was missing despite
+the historical hunk below; it was actually applied on 2026-10-06.
 
 ### 14.4 `town` field 8 = per-zoom map icon + label keys
 

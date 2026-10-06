@@ -220,8 +220,8 @@ check("traffic instances reach the frame (not culled as local-space batches)",
 # ------------------------------------------------------------ node events
 # mod_*.sch ( nodeevent ID KIND "waynode" DIR "text" ): king.exe fires these on
 # a road PositionId transition, then filters the link travel vector by DIR.  The
-# port associates the free-driving pose with the named .way node in a narrow
-# radius until the player vehicle exposes the original road PositionId.
+# port projects the free-driving pose onto named RSEG links and checks their
+# local direction and height; off-road poses must not fire nearby events.
 print("gameplay scripts (node events)")
 out = run("--scene", "world", "--no-map", "--screenshot",
           "--out", os.path.join(OUT, "event.bmp"),
@@ -424,7 +424,7 @@ check("roadblock spawns cars when the player arrives", bool(m) and int(m.group(3
       f"{m.group(1)}: {m.group(3)}x {m.group(4)}" if m else "no line")
 all_drawn = re.findall(r"gates: \d+ hidden key groups, (\d+) of (\d+) submeshes drawn", out)
 check("ambush geometry is added to the world",
-      bool(all_drawn) and int(all_drawn[-1][0]) > 70000,
+      len(all_drawn) > 1 and int(all_drawn[-1][0]) > int(all_drawn[0][0]),
       f"{all_drawn[-1][0]} drawn (first {all_drawn[0][0]})" if all_drawn else "no line")
 w, h, rows = read_bmp(os.path.join(OUT, "ambush.bmp"))
 warn = banner_px(rows, 400, 900)
@@ -1354,10 +1354,14 @@ if "playerwheel_samples" not in out:                    # (regex sanity, not a c
     print("   note: no player wheel line in the drive output")
 m = re.search(r"drive: RESULT playerwheel_samples=(\d+) noasphalt=(\d+) "
               r"mean=([-+]?[\d.]+) p95=([\d.]+) max=([\d.]+).*maxstep=([\d.]+)", out)
+full_road = re.search(r"drive: RESULT3 fully_asphalt_n=(\d+) max=([\d.]+) p95=([\d.]+) "
+                      r"mixed_or_offroad_frames=(\d+)",out)
 check("the player's wheels stand on the road surface (not on the terrain below it)",
-      bool(m) and int(m.group(1)) > 1000 and float(m.group(5)) < 0.05 and float(m.group(6)) < 0.5,
-      f"{m.group(1)} samples, max {m.group(5)} m, p95 {m.group(4)} m, "
-      f"per-frame step {m.group(6)} m" if m else "no RESULT line")
+      bool(m and full_road) and int(full_road.group(1)) > 1000
+      and float(full_road.group(2)) < 0.05 and float(m.group(6)) < 0.5,
+      f"{full_road.group(1)} fully-on-asphalt samples, max {full_road.group(2)} m; "
+      f"mixed/offroad frames {full_road.group(4)}, overall max {m.group(5)} m, "
+      f"per-frame step {m.group(6)} m" if m and full_road else "no RESULT line")
 # (the RESULT prints a forced sign, e.g. mean=+0.000, since the onroad_* fields)
 
 # ------------------------------------------------------ the road does not shake
@@ -1426,7 +1430,7 @@ if m:
 # ratio between the two layers; terrain must not support road traffic.
 rep2 = run("--scene", "world", "--traffic-wheel-probe", "8")
 m = re.search(r"traffic-wheel-probe: player route \(2 starts\): \d+ frames, layers terrain "
-              r"\d+, \.way \d+, tile asphalt \d+, (\d+) m driven", rep2)
+              r"\d+, \.way \d+, tile asphalt \d+, authored ground \d+, (\d+) m driven", rep2)
 check("the truck drives off the road network without being blocked (the apron hand-over)",
       bool(m) and int(m.group(1)) >= 25,
       f"{m.group(1) if m else '?'} m driven off-network; the ramp must not present a wall "

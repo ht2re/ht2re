@@ -38,11 +38,13 @@ public:
     // nearest point of this polyline set, so it has no 12-unit quantisation.
     void setRoadSegments(const std::vector<float>& xyz1);
     // Authored asphalt triangles take precedence wherever they cover a point;
-    // the graph profile is the fallback when no actual road surface is found.
+    // authored grass/soil then supplies contact off the carriageway.
     void buildRoadSurface(const std::vector<B3D::SubMesh>& meshes);
     const RoadSurface& roadSurface() const { return roadField_; }
-    // One entry point: containing asphalt, else graph profile/ramp, else terrain.
-    // `outSource` is 0 = terrain, 1 = `.way`, 2 = tile road.
+    const RoadSurface& groundSurface() const { return terrainField_; }
+    // One entry point: containing asphalt/ground, narrow ground-edge hand-over,
+    // then coarse fallback. Legacy graph/profile ramp remains for road-only data.
+    // `outSource`: 0 = coarse, 1 = `.way`, 2 = asphalt, 3 = ground/edge hand-over.
     float drivableY(float x, float z, float fallback, int* outSource = nullptr,
                     float* outDist = nullptr) const;
     bool empty() const { return w_ <= 0 || h_ <= 0 || data_.empty(); }
@@ -145,6 +147,7 @@ private:
     std::map<long long, std::vector<int>> roadBuckets_;
     void bucketSegment(int seg, float ax, float az, float bx, float bz);
     RoadSurface roadField_;
+    RoadSurface terrainField_;    // exact grass/soil/paved ground, not vertex averages
 };
 
 } // namespace ht2

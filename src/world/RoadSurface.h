@@ -74,7 +74,8 @@ public:
     // the .cpp for the enumerated list and the exclusions).  Shared with the
     // measurement probes so "asphalt" means the same thing everywhere.
     static bool isRoadMaterial(const std::string& name);
-    void build(const std::vector<B3D::SubMesh>& meshes);
+    static bool isGroundMaterial(const std::string& name);
+    void build(const std::vector<B3D::SubMesh>& meshes, bool groundSurfaces = false);
     bool empty() const { return tris_.empty(); }
     const Info& info() const { return info_; }
     // Material names accepted / rejected, for the report.
@@ -99,6 +100,10 @@ public:
     // query point.
     bool heightAt(float x, float z, float ref, float maxDist,
                   float& outY, float& outDist, bool& outVisible) const;
+    // Closest point on a non-asphalt ground triangle, for the narrow boundary
+    // hand-over where the generated terrain fills gaps between authored patches.
+    bool nearestGroundHeight(float x, float z, float ref, float maxDist,
+                             float& outY, float& outDist) const;
 
 private:
     // Horizontal distance to the nearest road triangle edge (maxDist + 1 when

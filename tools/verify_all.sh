@@ -35,6 +35,10 @@ run audio tools/build_audio_check.sh
 run physics tools/physics_ab.sh ZIL
 run road-safety-build c++ -std=c++17 -O2 -Isrc tools/road_safety_test.cpp src/world/GroundMap.cpp src/world/RoadSurface.cpp src/world/Terrain.cpp src/world/Way.cpp src/game/Vehicle.cpp src/game/Collision.cpp -o "$LOGDIR/road-safety-test"
 run road-safety "$LOGDIR/road-safety-test"
+run ground-contact-build c++ -std=c++17 -O2 -Isrc tools/ground_contact_test.cpp src/world/B3D.cpp src/world/GroundMap.cpp src/world/RoadSurface.cpp src/world/Terrain.cpp -o "$LOGDIR/ground-contact-test"
+run ground-contact "$LOGDIR/ground-contact-test" original
+run vehicle-state-build c++ -std=c++17 -O1 -Isrc tools/vehicle_state_test.cpp src/world/B3D.cpp src/script/GameData.cpp src/script/Sexp.cpp src/script/Sdte.cpp src/world/Way.cpp -o "$LOGDIR/vehicle-state-test"
+run vehicle-states "$LOGDIR/vehicle-state-test" original
 run lane-build c++ -std=c++17 -O2 -Isrc tools/traffic_lane_test.cpp src/game/Traffic.cpp src/game/Collision.cpp src/world/Way.cpp -o "$LOGDIR/lane-test"
 run lanes "$LOGDIR/lane-test"
 run traffic-build c++ -std=c++17 -O2 -Isrc tools/traffic_test.cpp src/game/Traffic.cpp src/game/Collision.cpp src/world/Way.cpp -o "$LOGDIR/traffic-test"
@@ -53,6 +57,7 @@ run steering-build c++ -std=c++17 -O2 -Isrc tools/cockpit_steering_test.cpp "${l
 run steering "$LOGDIR/steering-test" "$LOGDIR/steering"
 if [[ -f build/media/kotr.rvid ]]; then run video "$PYTHON" tools/video_probe.py build/media/kotr.rvid; fi
 if [[ ${1:-} != --quick ]]; then
+    run vehicle-visual "$PYTHON" tools/vehicle_visual_test.py "$LOGDIR/vehicle-visual"
     run screenshots "$PYTHON" -u tools/shot_test.py
     run menu "$PYTHON" -u tools/menu_flow_test.py
     run mirror tools/mirror_check.sh 20 original

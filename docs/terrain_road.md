@@ -1,5 +1,22 @@
 # The road breaking apart on bends ("дорога разваливается на поворотах")
 
+Update 2026-10-06 (lawn report): authored grass/soil/paved ground now has a
+triangle contact index as well. `drivableY` reports source 3 for that surface,
+before nearby waypoint extrapolation or coarse terrain. Asphalt wins at the
+same height; lawn below a bridge keeps its own level by reference continuity.
+Spawn seeds from containing geometry, and vertical smoothing never leaves the
+chassis below an uphill contact plane. Water, trees, posters, roofs and walls
+are excluded from ground materials. Small patches and slopes up to 85 degrees
+remain solid; steeper faces are walls, not wheel support. Gaps join to nearby
+ground edges over one coarse cell; where no authored road answers, navigation
+no longer substitutes a lower road for missing ground. This boundary blend is
+a port approximation, not reconstructed original terrain collision. Unreachable
+wheel levels are treated as obstacles rather than pitching/rolling the cabin
+towards another deck. Road safety: 46/46. Real ground probe:
+39 tiles, 312609 samples, no graph/coarse fallbacks and no error >5.1cm,
+p95 0.000114m (asphalt precedence within 5cm). These tests do not prove that
+every reported road shimmer or multi-level ambiguity has disappeared.
+
 Update 2026-10-05 (repeat report): physics now prefers the containing authored
 asphalt triangle over the graph height. `RoadSurface::heightAt` reports zero
 horizontal distance for a contained point, rather than distance to a triangle

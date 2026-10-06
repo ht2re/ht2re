@@ -40,7 +40,24 @@ bool RoadSurface::isRoadMaterial(const std::string& name) {
     return roadMaterial(name, lower);
 }
 
-void RoadSurface::build(const std::vector<B3D::SubMesh>& meshes) {
+bool RoadSurface::isGroundMaterial(const std::string& name) {
+    std::string lower = name;
+    for (char& c : lower) c = (char)tolower((unsigned char)c);
+    // Material alone is not enough: build() also rejects vertical triangles.
+    for (const char* word : {"water", "river", "lake", "fence", "wall", "pillar",
+                             "stolb", "tree", "forest", "roof", "bshadow", "mark",
+                             "poster", "church", "side_beton", "beton_bridge"})
+        if (lower.find(word) != std::string::npos) return false;
+    if (isRoadMaterial(name)) return true;
+    if (lower.rfind("ter_",0)==0 || lower.rfind("mat_ter_",0)==0) return true;
+    for (const char* word : {"grass", "ground", "earth", "sand", "dirt",
+                             "gravel", "pavement", "sidewalk", "trotoar", "trotuar",
+                             "parking", "stoyanka", "beton", "concrete", "apron", "runway"})
+        if (lower.find(word) != std::string::npos) return true;
+    return false;
+}
+
+void RoadSurface::build(const std::vector<B3D::SubMesh>& meshes, bool groundSurfaces) {
     const auto t0 = std::chrono::steady_clock::now();
     tris_.clear();
     grid_ = Grid();
@@ -51,7 +68,11 @@ void RoadSurface::build(const std::vector<B3D::SubMesh>& meshes) {
     float minX = 1e30f, maxX = -1e30f, minZ = 1e30f, maxZ = -1e30f;
     for (const auto& sm : meshes) {
         std::string lower;
-        if (sm.material.empty() || !roadMaterial(sm.material, lower)) continue;
+        if (groundSurfaces) {
+            if (!isGroundMaterial(sm.material)) continue;
+            lower = sm.material;
+            for (char& c : lower) c = (char)tolower((unsigned char)c);
+        } else if (sm.material.empty() || !roadMaterial(sm.material, lower)) continue;
         if (std::find(materials_.begin(), materials_.end(), lower) == materials_.end())
             materials_.push_back(lower);
         const std::string matName = lower;
@@ -77,10 +98,13 @@ void RoadSurface::build(const std::vector<B3D::SubMesh>& meshes) {
             float nZ = ux * vy - uy * vx;
             float len = sqrtf(nX * nX + nY * nY + nZ * nZ);
             if (!(len > 1e-6f)) continue;
-            if (std::fabs(nY) / len < 0.5f) continue;          // > 60 degrees
+            // Natural cut slopes and small lawn patches are still solid ground.
+            // Filtering them like carriageway creates holes in the contact field;
+            // the vehicle's climb/drop checks decide whether they are driveable.
+            if (std::fabs(nY) / len < (groundSurfaces ? 0.087156f : 0.5f)) continue; // ground: <85 deg
             float ex = std::max(std::fabs(ux), std::fabs(vx));
             float ez = std::max(std::fabs(uz), std::fabs(vz));
-            if (ex < 2.0f && ez < 2.0f) continue;              // not a surface
+            if (!groundSurfaces && ex < 2.0f && ez < 2.0f) continue;
             tr.mat = (uint8_t)std::min<size_t>(
                 255, (size_t)std::distance(materials_.begin(),
                                            std::find(materials_.begin(), materials_.end(), matName)));
@@ -193,6 +217,39 @@ void RoadSurface::build(const std::vector<B3D::SubMesh>& meshes) {
         g.nx, g.nz, (double)g.cell, info_.surfaceSlots,
         info_.bucketed ? (double)info_.surfaceSlots / (double)info_.bucketed : 0.0,
         info_.edgeSlots, info_.tris, info_.edges, info_.bytes() / 1048576.0, info_.ms);
+}
+
+bool RoadSurface::nearestGroundHeight(float x, float z, float ref, float maxDist,
+                                     float& outY, float& outDist) const {
+    if (tris_.empty() || maxDist <= 0) return false;
+    const Grid& g=grid_;
+    const int x0=std::max(0,(int)std::floor((x-maxDist-g.minX)/g.cell));
+    const int x1=std::min(g.nx-1,(int)std::floor((x+maxDist-g.minX)/g.cell));
+    const int z0=std::max(0,(int)std::floor((z-maxDist-g.minZ)/g.cell));
+    const int z1=std::min(g.nz-1,(int)std::floor((z+maxDist-g.minZ)/g.cell));
+    float best=maxDist*maxDist, bestRef=1e30f;
+    bool found=false;
+    for(int iz=z0;iz<=z1;++iz)for(int ix=x0;ix<=x1;++ix) {
+        const size_t bin=(size_t)iz*g.nx+ix;
+        for(int k=g.firstTriangle[bin];k<g.firstTriangle[bin+1];++k) {
+            const auto& t=tris_[(size_t)g.tri[(size_t)k]];
+            if(t.mat>=materials_.size()||isRoadMaterial(materials_[t.mat]))continue;
+            const float p[3][3]={{t.ax,t.ay,t.az},{t.bx,t.by,t.bz},{t.cx,t.cy,t.cz}};
+            for(int e=0;e<3;++e) {
+                const auto& a=p[e];const auto& b=p[(e+1)%3];
+                const float dx=b[0]-a[0],dz=b[2]-a[2],len=dx*dx+dz*dz;
+                const float u=len>1e-9f?std::max(0.f,std::min(1.f,((x-a[0])*dx+(z-a[2])*dz)/len)):0;
+                const float ex=x-a[0]-u*dx,ez=z-a[2]-u*dz,d=ex*ex+ez*ez;
+                const float y=a[1]+u*(b[1]-a[1]),dy=std::fabs(y-ref);
+                if(dy>20)continue; // do not connect to a different vertical tier
+                if(d<best-1e-5f || (std::fabs(d-best)<=1e-5f&&dy<bestRef)) {
+                    best=d;bestRef=dy;outY=y;found=true;
+                }
+            }
+        }
+    }
+    if(found)outDist=std::sqrt(best);
+    return found;
 }
 
 int RoadSurface::surfacesAt(float x, float z, float maxDist, std::vector<float>& out) const {

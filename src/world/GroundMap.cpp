@@ -452,6 +452,7 @@ float GroundMap::surfaceAt(float x, float z, float fallback) const {
 
 void GroundMap::buildRoadSurface(const std::vector<B3D::SubMesh>& meshes) {
     roadField_.build(meshes);
+    terrainField_.build(meshes, true);
 }
 
 float GroundMap::drivableY(float x, float z, float fallback, int* outSource,
@@ -481,13 +482,38 @@ float GroundMap::drivableY(float x, float z, float fallback, int* outSource,
         if (tileHit && (tileD > 12.0f || !(std::fabs(tileY - ref) <= 20.0f)))
             tileHit = false;
     }
-    // A containing authored asphalt triangle is the actual contact surface.
-    // The graph is navigation, not a substitute for the deck's crossfall.
-    if (tileHit && tileD < 0.01f) {
+    float groundY = 0, groundD = 0;
+    bool groundVisible = false;
+    const bool groundHit = terrainField_.heightAt(x, z, ref, 0, groundY, groundD, groundVisible);
+    // Prefer asphalt on the same level, but not a bridge deck above a car
+    // that is already on the lawn below it. Both are real authored surfaces.
+    if (tileHit && tileD < 0.01f &&
+        (!groundHit || std::fabs(tileY-ref) <= std::fabs(groundY-ref)+.05f)) {
         if (outSource) *outSource = 2;
         if (outDist) *outDist = 0;
         return tileY;
     }
+    // A lawn is not the nearby navigation centreline. Contact follows the
+    // authored triangle, before any graph extrapolation or smoothed fallback.
+    if (groundHit) {
+        if (outSource) *outSource = 3;
+        if (outDist) *outDist = 0;
+        return groundY;
+    }
+    // A coarse cell beside a lawn can be several metres below the lawn edge.
+    // Join to the actual edge across one cell instead of hitting an artificial
+    // height step as soon as containment starts. Never extrapolate asphalt or
+    // connect different decks; exact containing asphalt above has precedence.
+    if (terrainField_.nearestGroundHeight(x,z,ref,cell_,groundY,groundD)) {
+        const float weight=1-groundD/cell_;
+        if(outSource)*outSource=3;
+        if(outDist)*outDist=groundD;
+        return base+(groundY-base)*weight;
+    }
+    // With authored ground available, navigation must not manufacture a lower
+    // road across a gap in the lawn. This would turn the end of the edge blend
+    // into a drop wall (and then the next patch into a climb wall).
+    if (!terrainField_.empty() && !tileHit) return base;
     float wayY = 0.0f, wayD = 0.0f;
     bool wayHit = false;
     if (!roadSegCount_.empty()) {
@@ -537,7 +563,7 @@ float GroundMap::drivableY(float x, float z, float fallback, int* outSource,
         // function of the terrain field alone (a pure function of x, z), so the
         // surface stays path-independent, unlike the old ramp whose base was the
         // caller's own height.
-        if (!(tileHit && tileD <= 12.0f)) {
+          if (!(tileHit && tileD <= 12.0f)) {
             const float kRampSlope = 0.5f;
             float rise = base - wayY;
             if (rise > 0.0f) {

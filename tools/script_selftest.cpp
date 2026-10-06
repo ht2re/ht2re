@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <set>
 #include <dirent.h>
 #include <map>
 #include <string>
@@ -179,6 +180,11 @@ int main(int argc, char** argv) {
         st.hour = hour;
         st.weather = weather;
         st.havePosition = false;
+        // These snapshots represent loading the world under each condition,
+        // not per-frame resampling (onModuleLoadX at 0x42aba0).
+        std::set<std::string> modules;
+        for(const auto& g:gd.gates)modules.insert(g.tile);
+        for(const auto& module:modules)rt.onModuleLoad(module,st);
         rt.update(st);
         return rt.coverage();
     };
@@ -324,7 +330,9 @@ int main(int argc, char** argv) {
         st.px = 1e6; st.pz = 1e6;                 // far from every obstacle
         rt.update(st);
         size_t before = rt.coverage().obstaclesClosed;
-        st.time = 700.0; rt.update(st);
+        // Original first delay is 600 + rand()%300, not a fixed 600;
+        // 700 is not guaranteed to have reached the sampled deadline.
+        st.time = rt.nextObstacleToggleTime(); rt.update(st);
         ScriptCoverage c1 = rt.coverage();
         st.time = 2000.0; rt.update(st);
         ScriptCoverage c2 = rt.coverage();

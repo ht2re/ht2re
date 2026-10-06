@@ -343,12 +343,15 @@ builds against the pre-change module with `-DHT2_TRAFFIC_OLD`.
 
 ## 11. Why every AI car looked damaged
 
-Damage in `COMMON/TRUCKS.B3D` is a **material swap**, not a different container:
-every body panel exists twice inside one vehicle container - the intact skin
+Update 2026-10-06: damage in `COMMON/TRUCKS.B3D` is a **geometry-state switch**.
+`refer_Damage*Key` has alternative child branches, including four tyre states
+under `refer_DamageWheel*Key`. The historical material census below could not
+detect damaged shapes that reuse intact materials. Many body panels also have
+the intact skin
 (`Fiat_all1`, `BMW_all1`, `volga_all2`, ...) and the dented one
 (`Fiat_alld1`, `BMW_alld1`, ...) - plus damaged-only parts such as
 `common_BackLightsDmg`. Measured on the shipped data (built submeshes/triangles
-per skin):
+per skin, before selecting state/LOD branches; these are historical counts):
 
 | model | intact skin | dented skin |
 |---|---|---|
@@ -358,17 +361,21 @@ per skin):
 | Gazelle | `Gazelle_all1` 120 | `Gazelle_alld1` 273 |
 | Zil | parts only (`Zil_kabine1`/`kapot1`/`parts1`) | `common_BackLightsDmg` 24 |
 
-`B3D::buildNamedScene()` includes **everything**, so every car drew its intact
-*and* its dented skin on top of each other and looked pre-wrecked (20.9% of the
-pixels of a close-up car changed when the split was introduced). `App` now
-splits the materials (`damagedMaterial()`: `alld`, `damage`, `dmg`) and uploads
-**two render batches per AI model**: common parts + intact skin, and common parts
-+ dented skin. `Car::damage >= 0.35` selects the dented batch, so an undamaged car
-is intact and a car that has taken contacts shows the dented skin - the damage
-state only ever changes through the contact resolution of section 7. Parked cars
-and the player's truck are built intact (the Zil's *progressive* damage parts
-`Z_DAMAGE1..5` are not wired to the model yet). The `variant` field of
-`evehicles.sch`/`etrashboxes.sch` is the paint/trim variant, not damage.
+Raw `B3D::buildNamedScene()` keeps every branch for editing. Game paths now use
+`buildVehicleScene()`: body state 0 initially, healthy tyre state 0 throughout,
+and one high-detail LOD rather than all alternatives simultaneously. The old
+material-name filter is removed. AI has two batches (body 0 and body 3);
+`Car::damage >= 0.35` selects the damaged batch. The player's mesh similarly
+switches after accumulated damage and switches back after repair. Parked cars
+and ambush vehicles start intact. The 0.35 threshold/state-3 mapping remains
+a port approximation; localized dents, punctures and adaptive original LOD
+are not yet reconstructed. Paint/trim `variant` is separate and still open.
+
+`tools/vehicle_state_test.cpp`: 402 passing checks over 57 present models,
+including unchanged tyre geometry across body states. Two catalogue prop IDs
+(`AnmObj0231`, `AnmObj0241`) are not TRUCKS.B3D containers and remain explicit
+gaps. The real GL visual test injects damage without a collision and compares
+fixed-camera frames; it is not an oracle for original crash dynamics.
 
 ## 11b. Parked cars / roadblocks and the batch bounding sphere
 

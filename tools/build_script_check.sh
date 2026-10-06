@@ -19,3 +19,9 @@ c++ -std=c++17 -O1 -I src -o tools/out/script_selftest \
 
 echo "== tools/out/script_selftest (game scripts + recovered rules)"
 ./tools/out/script_selftest "${1:-original}"
+echo "== building tools/out/script_runtime_test"
+c++ -std=c++17 -O1 -I src -o tools/out/script_runtime_test \
+    tools/script_runtime_test.cpp \
+    src/script/ScriptRules.cpp src/script/Sexp.cpp src/script/Sdte.cpp \
+    src/script/GameData.cpp src/world/Way.cpp
+./tools/out/script_runtime_test "${1:-original}"
