@@ -507,8 +507,28 @@ I could not find any table in the shipped files (`.way`, `.b3d`, `.res`, `GAME.C
 `LOAD.RES`) that these ids index, and they are *not* global `RNOD` indices (762 nodes),
 global `RSEG` indices (2259), or global polyline-vertex indices (9853) in any tile
 ordering I tried — all four hypotheses were tested numerically and rejected, see §7 item 3.
-**For re-implementation they can be ignored:** the position comes from field 5, and the
-node list is an ordered set of 1–10 points.
+**Correction 2026-10-07:** the IDs cannot be ignored. Original `0x42bf0d`
+uses slot%1000 and `0x569310`/`0x569410` addresses existing police/mafia
+objects at class base 2000/1000 + index. They are vehicle-pool references,
+not geometric points. The port's static placement remains temporary.
+The field-5 RNOD is usually off-road; `0x412d57` calls `0x436900` to resolve
+its road PositionId. `ambushArmable` requires a path of at least two entries
+and a strictly positive dot of its oriented tangent with the compass vector.
+The current RSEG shortest-path/projection adapter is an approximation, not
+the recovered PositionId resolver. `next` conditionally deactivates an
+already active, no-longer-armable partner (`0x42c469..0x42c4c4`); it does not
+activate partners automatically.
+
+**Load-change correction 2026-10-07:** `markAmbushes` (`0x42c0b0`, direct
+caller `0x442d74` in `accountForChangeInLoadState`) clears armed first,
+then samples `rnd(1000000)<300000` for POLICE and eligible MAFIA only.
+MAFIA requires `(player+0x218 > 0 OR player+0x201)` and the additional
+`player+0x300 > 0.2` predicate. Distance does not arm an ambush; activation
+does not consume armed. The port implements this kernel through
+`onLoadStateChanged` and Economy load revisions, not per-frame sampling.
+Its two MAFIA predicate inputs currently both use the active cargo's
+`formafia` tag: a temporary adapter, not recovered meanings of these fields.
+Initial callback timing, shared PRNG call order and the vehicle pool remain open.
 
 ```lisp
 ; A paired mafia roadblock in tile ad: two ambushes of 5 slots each (1325-1329 / 1320-1324),

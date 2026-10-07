@@ -169,18 +169,33 @@ int main(int argc, char** argv) {
         ec.setMoney(before);
     }
 
+    {
+        Economy remap;remap.setWayNodes(nodes);remap.init(gd);
+        check(!remap.jobs().empty()&&remap.accept(0),"load-revision remap fixture accepts cargo");
+        const size_t revision=remap.loadStateRevision();
+        remap.setWayNodes({});
+        check(!remap.activeJob()&&remap.loadStateRevision()==revision+1,
+              "loss of active route nodes signals load-state removal");
+        remap.restoreProgress(0,-1);
+        check(remap.loadStateRevision()==revision+2,"save restoration signals a load-state callback");
+    }
     // ---- accept / deliver ------------------------------------------------
     if (!near.empty()) {
         const size_t idx = near[0];
         const Economy::Job j = ec.jobs()[idx];
+        const size_t loadRevision=ec.loadStateRevision();
         check(ec.accept(idx), "accept a nearby job");
+        check(ec.loadStateRevision()==loadRevision+1,"successful pickup advances load-state callback revision");
         check(ec.activeJob() != nullptr, "one active job");
         size_t other = near.size() > 1 ? near[1] : idx;
         check(!ec.accept(other), "a second job is refused while one is active");
+        check(ec.loadStateRevision()==loadRevision+1,"refused pickup does not reroll load state");
         long paid = 0;
         check(!ec.deliver(gd.startPos[0], gd.startPos[1], 10.0f, &paid), "far from drop-off pays nothing");
+        check(ec.loadStateRevision()==loadRevision+1,"failed delivery does not reroll load state");
         const long before = ec.money();
         check(ec.deliver(j.toX, j.toZ, 10.0f, &paid), "deliver at the drop-off node");
+        check(ec.loadStateRevision()==loadRevision+2,"successful unload advances callback revision");
         check(ec.delivered() == 1 && paid == j.reward && ec.money() == before + j.reward,
               "reward paid once and counted",
               "paid " + std::to_string(paid) + " delivered " + std::to_string(ec.delivered()));

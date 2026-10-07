@@ -41,6 +41,8 @@ run vehicle-state-build c++ -std=c++17 -O1 -Isrc tools/vehicle_state_test.cpp sr
 run vehicle-states "$LOGDIR/vehicle-state-test" original
 run lane-build c++ -std=c++17 -O2 -Isrc tools/traffic_lane_test.cpp src/game/Traffic.cpp src/game/Collision.cpp src/world/Way.cpp -o "$LOGDIR/lane-test"
 run lanes "$LOGDIR/lane-test"
+run traffic-safety-build c++ -std=c++17 -O2 -Isrc tools/traffic_safety_test.cpp src/game/Traffic.cpp src/game/Collision.cpp src/world/Way.cpp -o "$LOGDIR/traffic-safety-test"
+run traffic-safety "$LOGDIR/traffic-safety-test"
 run traffic-build c++ -std=c++17 -O2 -Isrc tools/traffic_test.cpp src/game/Traffic.cpp src/game/Collision.cpp src/world/Way.cpp -o "$LOGDIR/traffic-test"
 run traffic "$LOGDIR/traffic-test" original/ENV 100 1800 1 1
 # Use the same current engine objects; exclude the application entry points.
@@ -55,6 +57,9 @@ if [[ $(uname) == Darwin ]]; then glflags=(-framework OpenGL); else glflags=(-lG
 run steering-build c++ -std=c++17 -O2 -Isrc tools/cockpit_steering_test.cpp "${linked[@]}" \
     $(pkg-config --cflags --libs sdl2 sdl2_mixer) "${glflags[@]}" -o "$LOGDIR/steering-test"
 run steering "$LOGDIR/steering-test" "$LOGDIR/steering"
+run menu-interaction-build c++ -std=c++17 -O2 -Isrc tools/menu_interaction_test.cpp "${linked[@]}" \
+    $(pkg-config --cflags --libs sdl2 sdl2_mixer) "${glflags[@]}" -o "$LOGDIR/menu-interaction-test"
+run menu-interaction "$LOGDIR/menu-interaction-test"
 if [[ -f build/media/kotr.rvid ]]; then run video "$PYTHON" tools/video_probe.py build/media/kotr.rvid; fi
 if [[ ${1:-} != --quick ]]; then
     run vehicle-visual "$PYTHON" tools/vehicle_visual_test.py "$LOGDIR/vehicle-visual"

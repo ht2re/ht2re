@@ -185,6 +185,8 @@ private:
     void prepareNodeEvents();
     void updateNodeEvents(float dt);
     std::unique_ptr<ScriptRuntime> scriptRuntime_;
+    size_t scriptLoadRevision_ = 0;
+    bool scriptLoadInitialized_ = false;
     double scriptTime_ = 0.0;
     std::string currentRegion_;
     float msgTimer_ = 0.0f;
@@ -270,12 +272,13 @@ private:
         std::string klass;
         int cars = 1;
         size_t scriptIndex = 0;
-        bool fired = false;
+        bool realized = false;       // cached geometry, not a permanent activation
+        int observedFires = 0;
+        std::string group;
     };
     std::vector<AmbushState> ambushes_;
     void initAmbushes();
     void updateAmbushes();
-    size_t ambushesFired_ = 0;
 
     Hud hud_;                     // the original top LED strip
     Map map_;                     // the original left-hand road map overlay

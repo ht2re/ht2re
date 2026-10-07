@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include "GameData.h"
+#include "EngineRandom.h"
 #include "../world/Way.h"
 
 namespace ht2 {
@@ -154,8 +155,8 @@ struct ObstacleState {
 
 struct AmbushState {
     const GameData::Ambush* def = nullptr;
-    bool active = false;      // inside the 250..600 u band
-    bool armed = false;       // the player has been outside the band at least once
+    bool active = false;      // persists until farther than 600 u
+    bool armed = false;       // load-change mark, not a distance/cooldown flag
     bool satisfied = false;
     int fires = 0;
     double x = 0, z = 0;
@@ -203,6 +204,8 @@ public:
     // calls onNodePass).  Without it the 20 u radius stand-in is used.
     void setRoadSegments(const std::vector<ScriptRoadSeg>& segs);
     bool haveRoadSegments() const { return !roadSegs_.empty(); }
+    // Diagnostics: distinguishes authored anchors from radius-only fallback.
+    size_t ambushRoadAnchors() const;
     // The .way node the player's road position is currently on ("" = off-road).
     const std::string& currentRoadNode() const { return lastRoadNode_; }
     // how many passes the road rule produced (diagnostics / --script-report)
@@ -244,7 +247,10 @@ public:
     void setNodeEventOneShot(bool v) { oneShot_ = v; }
     bool nodeEventOneShot() const { return oneShot_; }
     void setNodePassRadius(double r) { passRadius_ = r; }
-    void setSeed(uint32_t s) { rng_ = s ? s : 1; }
+    void setSeed(uint32_t s) { rng_.reset(s); }
+    // king.exe markAmbushes (0x42c0b0), invoked on load-state changes.
+    // These booleans are the recovered predicates, not guessed player fields.
+    void onLoadStateChanged(bool mafiaLoadEligible, bool mafiaPlayerEligible);
     // The weatherandtime probe `--script-report` prints the engine's own
     // badness curve for (clearness w[+0x220], amp w[+0x78], phase w[+0x68]).
     void setBadnessProbe(double clearness, double amp, double phase) {
@@ -274,9 +280,11 @@ private:
     void updateNodeEvents(const ScriptWorldState&);
     void updateObstacles(const ScriptWorldState&);
     void updateAmbushes(const ScriptWorldState&);
+    bool ambushRoadApproach(const AmbushState&, const ScriptWorldState&) const;
+    void buildAmbushRoadGraph();
     bool passDirectionOk(const GameData::NodeEvent& e, double mx, double mz) const;
     double distTo(double x, double z, const ScriptWorldState&, double y = 0) const;
-    uint32_t rnd();
+    uint32_t rnd(uint32_t bound);
     // the engine's node-pass rule; returns the node the player moved onto (or
     // ""), and fills the travel vector the original derives from the two road
     // positions (0x43e7de: new - previous).
@@ -303,7 +311,20 @@ private:
     size_t roadPasses_ = 0, radiusPasses_ = 0;
     double badnessProbe_[3] = {0.35, 0.0, 0.0};
     double nextObstacleToggle_ = -1.0; // initial delay sampled after seeding
-    uint32_t rng_ = 0x12345678u;
+    EngineRandom rng_;
+    struct RouteVertex {
+        double x, z, y;
+        std::vector<std::pair<size_t, double>> links;
+    };
+    struct RouteEdge {
+        size_t a, b;
+        double widthA, widthB;
+        bool haveHeight;
+    };
+    std::vector<RouteVertex> routeVertices_;
+    std::vector<RouteEdge> routeEdges_;
+    std::map<std::string, size_t> routeNodes_;
+    std::map<std::string, std::pair<size_t,double>> routeAnchors_;
     ScriptCoverage cov_;
 };
 

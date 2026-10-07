@@ -97,6 +97,7 @@ const Economy::CargoDef* Economy::findCargo(const std::string& id) const {
 }
 
 void Economy::init(const GameData& gd) {
+    ++loadStateRevision_;
     stats_ = Stats();
     cargo_.clear();
     towns_.clear();
@@ -455,6 +456,7 @@ void Economy::resolvePositions() {
     }
     stats_.jobsResolved = jobs_.size();
     stats_.jobsUnresolved = unresolved;
+    if(!active.empty()&&!activeJob())++loadStateRevision_;
 
     // dealer positions + the dealer the player starts next to
     float best = 0;
@@ -523,6 +525,7 @@ bool Economy::restorePlayerModel(const std::string& model) {
 }
 
 void Economy::restoreProgress(size_t delivered, int activeJobIndex) {
+    ++loadStateRevision_;
     delivered_ = delivered;
     for (Job& j : jobs_) {
         j.active = false;
@@ -569,6 +572,7 @@ bool Economy::accept(size_t jobIndex) {
     Job& j = jobs_[jobIndex];
     if (j.done || j.fromNode.empty() || j.toNode.empty()) return false;
     j.active = true;
+    ++loadStateRevision_;
     return true;
 }
 
@@ -585,6 +589,7 @@ bool Economy::deliver(float x, float z, float radius, long* rewardOut) {
         }
         j.active = false;
         j.done = true;
+        ++loadStateRevision_;
         money_ += paid;
         ++delivered_;
         if (rewardOut) *rewardOut = paid;

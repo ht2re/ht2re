@@ -868,7 +868,6 @@ void App::prepareNodeEvents() {
     indexWayNodes();
     scriptRuntime_.reset(new ScriptRuntime(gameData_));
     scriptRuntime_->setNodePassRadius(std::max(0.0f, opt_.eventRadius));
-    scriptRuntime_->setSeed(rng_);
     std::vector<ScriptNodePos> nodes;
     nodes.reserve(wayNodes_.size());
     for (const auto& kv : wayNodes_)
@@ -908,6 +907,15 @@ void App::updateNodeEvents(float dt) {
     st.py = vehicle3d_.y()-Vehicle::RIDE_HEIGHT;
     st.haveHeight = true;
     st.havePosition = true;
+    if(!scriptLoadInitialized_||scriptLoadRevision_!=economy_.loadStateRevision()) {
+        const auto* job=economy_.activeJob();
+        // Port adapter: formafia is the currently available cargo-risk signal.
+        // Exact original load/player risk fields remain an open discrepancy.
+        const bool mafiaEligible=job&&job->mafia;
+        scriptRuntime_->onLoadStateChanged(mafiaEligible,mafiaEligible);
+        scriptLoadRevision_=economy_.loadStateRevision();scriptLoadInitialized_=true;
+        LOG("scripts: load state changed, ambush eligibility sampled (mafia=%d)",mafiaEligible?1:0);
+    }
     scriptRuntime_->update(st);
     for(const auto& obstacle:scriptRuntime_->obstacles()) {
         if(!obstacle.changed)continue;
@@ -998,6 +1006,10 @@ void App::spawnTraffic() {
     }
     if (ids.empty()) { LOG("traffic: no models available"); return; }
     traffic_.setModels(ids);
+    Traffic::Player player;
+    player.valid=true;player.x=vehicle3d_.x();player.z=vehicle3d_.z();player.yaw=vehicle3d_.yaw();
+    player.radius=playerRadius_;player.length=playerLength_;
+    traffic_.setPlayer(player);
     traffic_.spawn(vehicle3d_.x(), vehicle3d_.z(), opt_.trafficRadius, opt_.traffic);
     const Traffic::Stats& st = traffic_.stats();
     LOG("traffic: graph %zu v / %zu e, waypoints %zu/%zu, %zu cars (%zu models)",
@@ -1566,8 +1578,8 @@ long App::repairPrice() const {
 
 // ---------------------------------------------------------------------------
 // Ambushes: `( ambush ID POLICE|MAFIA … "waynode" DIR (slot…) … )`.  The slot
-// list is one id per car (police 44 / mafia 43 in the shipped data); the cars
-// themselves are spawned as a standing roadblock when the player gets close.
+// list references existing class-specific car ids in king.exe. The port still
+// approximates their placement with a static roadblock; activation is reusable.
 // ---------------------------------------------------------------------------
 void App::initAmbushes() {
     if (ambushes_.empty()) indexWayNodes();
@@ -1582,9 +1594,10 @@ void App::initAmbushes() {
         st.z = (float)it->second.pos.z;
         st.y = (float)it->second.pos.y;      // the road height at the ambush node
         st.klass = am.klass;
-        st.cars = (int)std::min<size_t>(am.slots.size(), 5);
+        st.cars = (int)am.slots.size();
         if (st.cars < 1) st.cars = 1;
         st.scriptIndex = ai;
+        st.group = "ht2_ambush_" + std::to_string(ai);
         ambushes_.push_back(st);
         ++resolved;
     }
@@ -1596,17 +1609,17 @@ void App::updateAmbushes() {
     const auto& runtime = scriptRuntime_->ambushes();
     const float px = vehicle3d_.x(), pz = vehicle3d_.z();
     for (auto& a : ambushes_) {
-        if (a.fired) continue;
-        if (a.scriptIndex >= runtime.size() || runtime[a.scriptIndex].fires <= 0) continue;
-        a.fired = true;
-        ++ambushesFired_;
-        // spawn the roadblock: cars lined up across the road, facing the player
+        if (a.scriptIndex >= runtime.size()) continue;
+        const auto& state = runtime[a.scriptIndex];
+        if (!state.active || state.fires <= a.observedFires) continue;
+        // Temporary port placement, NOT king.exe's class-specific vehicle pool.
+        // Cache this geometry on first activation; reactivation only unhides it.
         const std::string model = (a.klass == "MAFIA") ? "Cayman" : "BmwM5police";
         if (!parked_.loaded()) parked_.load(opt_.dataDir + "/COMMON/TRUCKS.B3D");
         float baseYaw = atan2f(px - a.x, pz - a.z);
         std::vector<B3D::SubMesh> extra;
-        int spawned = 0;
-        for (int i = 0; i < a.cars; ++i) {
+        int spawned = a.realized ? a.cars : 0;
+        for (int i = 0; !a.realized && i < a.cars; ++i) {
             if (!parked_.buildVehicleScene(model)) break;
             float side = ((float)i - (a.cars - 1) * 0.5f) * 3.6f;      // spread across
             float yaw = baseYaw + 1.5707963f;                           // across the road
@@ -1620,6 +1633,7 @@ void App::updateAmbushes() {
             const float yoff = modelGroundOffset(parked_.submeshes());
             for (auto& sm : parked_.submeshesMutable()) {
                 B3D::SubMesh t = sm;
+                t.group = a.group;
                 for (size_t v = 0; v + 2 < t.pos.size(); v += 3) {
                     float lx = t.pos[v], lz = t.pos[v + 1], lh = t.pos[v + 2];
                     t.pos[v] = ox + lx * cs + lz * sn;
@@ -1639,6 +1653,9 @@ void App::updateAmbushes() {
             ++spawned;
         }
         for (auto& sm : extra) worldMeshes_.push_back(std::move(sm));
+        a.realized = a.realized || !extra.empty();
+        if (!a.realized) continue;
+        a.observedFires = state.fires;
         LOG("ambush: '%s' (%s) fired at %.0f %.0f: %d %s cars, %zu submeshes",
             a.klass.c_str(), model.c_str(), a.x, a.z, spawned, model.c_str(), extra.size());
         msgText_ = (a.klass == "MAFIA") ? "ЗАСАДА: МАФИЯ!" : "ЗАСАДА: ПОЛИЦИЯ!";
@@ -1709,6 +1726,13 @@ void App::updateGates() {
             if (opt_.obstaclesOpen || o.closed) hidden.insert(o.def->key);
         for (const auto& g : scriptRuntime_->gates())
             if (!g.visible) hidden.insert(g.def->key);
+        // Runtime deactivates distant ambushes; keep their geometry cached, but
+        // never render inactive instances or append duplicates on reactivation.
+        const auto& ambushStates = scriptRuntime_->ambushes();
+        for (const auto& a : ambushes_)
+            if (a.realized && (a.scriptIndex >= ambushStates.size() ||
+                              !ambushStates[a.scriptIndex].active))
+                hidden.insert(a.group);
     } else {
         for (const auto& ob : gameData_.obstacles)
             if (opt_.obstaclesOpen) hidden.insert(ob.key);
@@ -3319,7 +3343,10 @@ void App::drawWorld(float dt, bool interactive) {
         font_.draw(r_, msgText_, bx + 20.0f, by + 12.0f, 1.6f, 1.0f, 0.97f, 0.75f, a);
     }
     if (!esc_.active()) {
-        if (ambushesFired_ > 0 && msgTimer_ <= 0.0f)
+        const bool ambushActive = scriptRuntime_ && std::any_of(
+            scriptRuntime_->ambushes().begin(), scriptRuntime_->ambushes().end(),
+            [](const ht2::AmbushState& a) { return a.active; });
+        if (ambushActive && msgTimer_ <= 0.0f)
             font_.draw(r_, "AMBUSH!", 16, (float)r_.height_ - 30, 1.3f, 1.0f, 0.4f, 0.35f, 1.0f);
         if (nearestService(true) >= 0 && vehicle3d_.fuel() < 0.95f)
             font_.draw(r_, "PRESS TAB TO REFUEL", 16, (float)r_.height_ - 30, 1.2f, 0.5f, 1.0f, 0.6f, 1.0f);

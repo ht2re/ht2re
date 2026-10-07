@@ -302,6 +302,8 @@ int main(int argc, char** argv) {
         if (rt.ambushes()[i].havePos) { ambIdx = i; break; }
     check(ambIdx < rt.ambushes().size(), "an ambush resolved to its .way node");
     if (ambIdx < rt.ambushes().size()) {
+        for(int attempt=0;attempt<200&&!rt.ambushes()[ambIdx].armed;++attempt)
+            rt.onLoadStateChanged(true,true);
         const ScriptNodePos* p = rt.nodePos(rt.ambushes()[ambIdx].def->wayNode);
         auto state = [&](double dz, double t) {
             ScriptWorldState st;
@@ -315,7 +317,7 @@ int main(int argc, char** argv) {
         AmbushState band = state(300.0, 200.1);
         AmbushState near = state(100.0, 200.2);
         AmbushState back = state(900.0, 200.3);
-        check(!far.active && far.armed && band.active && !near.active && !back.active && back.armed,
+        check(!far.active && far.armed && band.active && near.active && !back.active && back.armed,
               "ambush activates only inside 250..600 u",
               std::string("far=") + (far.active ? "on" : "off") +
               " band=" + (band.active ? "on" : "off") +

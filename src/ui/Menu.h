@@ -50,7 +50,7 @@ public:
     void handlePad(PadButton b);
     void handleMouse(float mx, float my, bool click);
     void update(float dt);
-    void setViewport(int w, int h) { vpW_ = w; vpH_ = h; }
+    void setViewport(int w, int h);
 
     // returns the id of the item activated this frame ("" if none)
     std::string takeActivated();

@@ -4,6 +4,9 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <queue>
+#include <tuple>
+#include <limits>
 
 namespace ht2 {
 
@@ -92,6 +95,7 @@ void ScriptRuntime::setNodePositions(const std::vector<ScriptNodePos>& nodes) {
         }
         if(!a.havePos) { a.active=false;a.armed=false;a.satisfied=false; }
     }
+    if(!roadSegs_.empty())buildAmbushRoadGraph();
 }
 
 const ScriptNodePos* ScriptRuntime::nodePos(const std::string& name) const {
@@ -99,10 +103,17 @@ const ScriptNodePos* ScriptRuntime::nodePos(const std::string& name) const {
     return it == nodeIndex_.end() ? nullptr : &nodes_[it->second];
 }
 
-uint32_t ScriptRuntime::rnd() {
-    // deterministic LCG; the engine uses its 55-state generator (0x68b9c8)
-    rng_ = rng_ * 1664525u + 1013904223u;
-    return rng_ >> 8;
+uint32_t ScriptRuntime::rnd(uint32_t bound) {
+    return rng_.bounded(bound);
+}
+
+void ScriptRuntime::onLoadStateChanged(bool mafiaLoadEligible,bool mafiaPlayerEligible) {
+    for(auto& a:ambushes_) {
+        a.armed=false;
+        const bool police=a.def->klass=="POLICE";
+        const bool mafia=a.def->klass=="MAFIA"&&mafiaLoadEligible&&mafiaPlayerEligible;
+        if(police||mafia)a.armed=rnd(1000000u)<300000u;
+    }
 }
 
 double ScriptRuntime::distTo(double x, double z, const ScriptWorldState& st, double y) const {
@@ -152,7 +163,7 @@ void ScriptRuntime::onModuleLoad(const std::string& module,const ScriptWorldStat
         // to onModuleLoadX, not the frame loop or a condition-edge callback.
         ++g.rolls;
         // 0x42adc2: roll = rand()/1e6; visible when prob > roll
-        const double roll = (double)(rnd() % 1000000u) / 1000000.0;
+        const double roll = (double)rnd(1000000u) / 1000000.0;
         g.visible = roll < (double)g.def->prob;
     }
 }
@@ -216,6 +227,158 @@ void ScriptRuntime::setRoadSegments(const std::vector<ScriptRoadSeg>& segs) {
         if(!s.nodeA.empty())roadAliases_[s.nodeA]=s.aliasesA;
         if(!s.nodeB.empty())roadAliases_[s.nodeB]=s.aliasesB;
     }
+    buildAmbushRoadGraph();
+}
+
+void ScriptRuntime::buildAmbushRoadGraph() {
+    routeVertices_.clear(); routeEdges_.clear(); routeNodes_.clear();routeAnchors_.clear();
+    std::map<std::tuple<long long,long long,long long>,size_t> points;
+    auto vertex = [&](double x,double z,double y) {
+        // Port welding tolerance, not an original PositionId representation.
+        auto key=std::make_tuple(std::llround(x*1000),std::llround(z*1000),std::llround(y*1000));
+        auto found=points.find(key);
+        if(found!=points.end())return found->second;
+        const size_t id=routeVertices_.size();
+        points[key]=id;routeVertices_.push_back({x,z,y,{}});return id;
+    };
+    for(const auto& s:roadSegs_) {
+        const size_t n=s.xz.size()/2;
+        if(n<2)continue;
+        std::vector<size_t> ids;
+        double total=0;
+        std::vector<double> arc(n,0);
+        for(size_t i=0;i<n;++i) {
+            size_t id=routeVertices_.size();bool named=false;
+            if(i==0||i+1==n) {
+                auto coincident=[&](size_t candidate) {
+                    const auto& p=routeVertices_[candidate];
+                    const double dx=p.x-s.xz[2*i],dz=p.z-s.xz[2*i+1];
+                    const double dy=p.y-(s.heights.size()==n?s.heights[i]:0);
+                    return dx*dx+dz*dz+dy*dy<=0.25;
+                };
+                const auto& aliases=i==0?s.aliasesA:s.aliasesB;
+                const auto& name=i==0?s.nodeA:s.nodeB;
+                auto found=routeNodes_.find(name);
+                if(found!=routeNodes_.end()&&coincident(found->second)) {id=found->second;named=true;}
+                for(const auto& alias:aliases)if(!named) {
+                    auto match=routeNodes_.find(alias);
+                    if(match!=routeNodes_.end()&&coincident(match->second)) {id=match->second;named=true;}
+                }
+            }
+            if(!named)id=vertex(s.xz[2*i],s.xz[2*i+1],s.heights.size()==n?s.heights[i]:0);
+            ids.push_back(id);
+            if(i)total+=std::hypot(s.xz[2*i]-s.xz[2*i-2],s.xz[2*i+1]-s.xz[2*i-1]);
+            arc[i]=total;
+        }
+        if(!s.nodeA.empty())routeNodes_[s.nodeA]=ids.front();
+        if(!s.nodeB.empty())routeNodes_[s.nodeB]=ids.back();
+        for(const auto& name:s.aliasesA)routeNodes_[name]=ids.front();
+        for(const auto& name:s.aliasesB)routeNodes_[name]=ids.back();
+        if(total<1e-6)continue;
+        for(size_t i=1;i<n;++i) {
+            const auto& a=routeVertices_[ids[i-1]];const auto& b=routeVertices_[ids[i]];
+            const double len=std::sqrt((b.x-a.x)*(b.x-a.x)+(b.z-a.z)*(b.z-a.z)+(b.y-a.y)*(b.y-a.y));
+            if(len<1e-6)continue;
+            routeVertices_[ids[i-1]].links.push_back({ids[i],len});
+            routeVertices_[ids[i]].links.push_back({ids[i-1],len});
+            const double delta=s.widthEnd>0?s.widthEnd-s.width:0;
+            routeEdges_.push_back({ids[i-1],ids[i],s.width+delta*arc[i-1]/total,
+                                  s.width+delta*arc[i]/total,s.heights.size()==n});
+        }
+    }
+    // king.exe 0x412d57 calls the position resolver for off-road ambush RNODs.
+    // Nearest 3D polyline projection is a PORT approximation of that resolver.
+    for(const auto& ambush:ambushes_) {
+        const auto* pos=nodePos(ambush.def->wayNode);
+        if(!pos)continue;
+        size_t bestEdge=routeEdges_.size();double best=std::numeric_limits<double>::infinity(),tBest=0;
+        for(size_t i=0;i<routeEdges_.size();++i) {
+            const auto& e=routeEdges_[i];const auto& a=routeVertices_[e.a];const auto& b=routeVertices_[e.b];
+            const double dx=b.x-a.x,dz=b.z-a.z,dy=b.y-a.y;
+            const double len2=dx*dx+dz*dz+dy*dy;
+            const double t=std::clamp(((pos->x-a.x)*dx+(pos->z-a.z)*dz+(pos->y-a.y)*dy)/len2,0.0,1.0);
+            const double x=pos->x-a.x-t*dx,z=pos->z-a.z-t*dz,y=pos->y-a.y-t*dy;
+            const double d=x*x+z*z+y*y;
+            if(d<best) {best=d;bestEdge=i;tBest=t;}
+        }
+        if(bestEdge==routeEdges_.size())continue;
+        const auto e=routeEdges_[bestEdge];
+        const auto a=routeVertices_[e.a],b=routeVertices_[e.b];
+        const double length=std::sqrt((b.x-a.x)*(b.x-a.x)+(b.z-a.z)*(b.z-a.z)+(b.y-a.y)*(b.y-a.y));
+        const size_t id=vertex(a.x+tBest*(b.x-a.x),a.z+tBest*(b.z-a.z),a.y+tBest*(b.y-a.y));
+        if(id!=e.a&&id!=e.b) {
+            routeVertices_[id].links.push_back({e.a,tBest*length});
+            routeVertices_[id].links.push_back({e.b,(1-tBest)*length});
+            routeVertices_[e.a].links.push_back({id,tBest*length});
+            routeVertices_[e.b].links.push_back({id,(1-tBest)*length});
+        }
+        routeNodes_[ambush.def->wayNode]=id;
+        routeAnchors_[ambush.def->wayNode]={bestEdge,tBest};
+    }
+}
+
+bool ScriptRuntime::ambushRoadApproach(const AmbushState& ambush,const ScriptWorldState& st) const {
+    // Radius-only fixtures retain their old fallback. App always supplies roads.
+    if(roadSegs_.empty())return true;
+    const auto target=routeNodes_.find(ambush.def->wayNode);
+    if(target==routeNodes_.end())return false;
+    double dx=0,dz=0;
+    if(ambush.def->dir=="NORTH")dz=1;
+    else if(ambush.def->dir=="SOUTH")dz=-1;
+    else if(ambush.def->dir=="EAST")dx=1;
+    else if(ambush.def->dir=="WEST")dx=-1;
+    else return false;
+    size_t edge=routeEdges_.size();double best=std::numeric_limits<double>::infinity(),fraction=0;
+    for(size_t i=0;i<routeEdges_.size();++i) {
+        const auto& e=routeEdges_[i];const auto& a=routeVertices_[e.a];const auto& b=routeVertices_[e.b];
+        const double vx=b.x-a.x,vz=b.z-a.z, len2=vx*vx+vz*vz;
+        if(len2<1e-12)continue;
+        const double t=std::clamp(((st.px-a.x)*vx+(st.pz-a.z)*vz)/len2,0.0,1.0);
+        const double y=a.y+t*(b.y-a.y);
+        if(st.haveHeight&&e.haveHeight&&std::fabs(st.py-y)>4.0)continue;
+        const double distance=std::hypot(st.px-a.x-t*vx,st.pz-a.z-t*vz);
+        const double half=std::max(2.0,(e.widthA+t*(e.widthB-e.widthA))*0.5);
+        if(distance>half)continue;
+        const double score=distance*distance+(st.haveHeight&&e.haveHeight?(st.py-y)*(st.py-y):0);
+        if(score<best) {best=score;edge=i;fraction=t;}
+    }
+    if(edge==routeEdges_.size())return false;
+    const auto& e=routeEdges_[edge];const auto& a=routeVertices_[e.a];const auto& b=routeVertices_[e.b];
+    const double length=std::sqrt((b.x-a.x)*(b.x-a.x)+(b.z-a.z)*(b.z-a.z)+(b.y-a.y)*(b.y-a.y));
+    const auto anchor=routeAnchors_.find(ambush.def->wayNode);
+    if(anchor!=routeAnchors_.end()&&anchor->second.first==edge)
+        return (anchor->second.second-fraction)*((b.x-a.x)*dx+(b.z-a.z)*dz)>0;
+    const size_t count=routeVertices_.size();
+    std::vector<double> distance(count,std::numeric_limits<double>::infinity());
+    std::vector<size_t> previous(count,count);
+    using Pending=std::pair<double,size_t>;
+    std::priority_queue<Pending,std::vector<Pending>,std::greater<Pending>> pending;
+    distance[e.a]=fraction*length;distance[e.b]=(1-fraction)*length;
+    pending.push({distance[e.a],e.a});pending.push({distance[e.b],e.b});
+    while(!pending.empty()) {
+        const auto [cost,id]=pending.top();pending.pop();
+        if(cost!=distance[id])continue;
+        if(id==target->second) {
+            const auto& end=routeVertices_[id];
+            const double fromX=previous[id]==count?a.x+fraction*(b.x-a.x):routeVertices_[previous[id]].x;
+            const double fromZ=previous[id]==count?a.z+fraction*(b.z-a.z):routeVertices_[previous[id]].z;
+            return (end.x-fromX)*dx+(end.z-fromZ)*dz>0;
+        }
+        for(const auto& link:routeVertices_[id].links) {
+            const double candidate=cost+link.second;
+            if(candidate<distance[link.first]) {
+                distance[link.first]=candidate;previous[link.first]=id;
+                pending.push({candidate,link.first});
+            }
+        }
+    }
+    return false;
+}
+
+size_t ScriptRuntime::ambushRoadAnchors() const {
+    return std::count_if(ambushes_.begin(),ambushes_.end(),[&](const AmbushState& a) {
+        return routeAnchors_.count(a.def->wayNode)!=0;
+    });
 }
 
 // The engine's node pass.  king.exe's setPlayerPosition (0x43e610) resolves the
@@ -360,8 +523,8 @@ void ScriptRuntime::updateNodeEvents(const ScriptWorldState& st) {
 void ScriptRuntime::updateObstacles(const ScriptWorldState& st) {
     if (obstacles_.empty() || !st.havePosition) return;
     const auto delay=[&]() {
-        return ScriptRules::kObstacleMinDelay+double(rnd()%uint32_t(
-            ScriptRules::kObstacleMaxDelay-ScriptRules::kObstacleMinDelay));
+        return ScriptRules::kObstacleMinDelay+double(rnd(uint32_t(
+            ScriptRules::kObstacleMaxDelay-ScriptRules::kObstacleMinDelay)));
     };
     if(nextObstacleToggle_<0)nextObstacleToggle_=delay();
     if (st.time < nextObstacleToggle_) return;
@@ -371,7 +534,7 @@ void ScriptRuntime::updateObstacles(const ScriptWorldState& st) {
     for (size_t i = 0; i < obstacles_.size(); ++i)
         if (obstacles_[i].closed) { current = i; break; }
     for (int attempt = 0; attempt < 5; ++attempt) {
-        const size_t pick = rnd() % obstacles_.size();
+        const size_t pick = rnd(uint32_t(obstacles_.size()));
         ObstacleState& c = obstacles_[pick];
         if(!c.havePos)continue;
         if (c.havePos) {
@@ -398,13 +561,28 @@ void ScriptRuntime::updateAmbushes(const ScriptWorldState& st) {
     for (auto& a : ambushes_) {
         if (!a.havePos || !st.havePosition) continue;
         const double d = distTo(a.x, a.z, st, a.y);
-        if (d > ScriptRules::kAmbushArmFar) { a.armed = true; a.active = false; a.satisfied = false; continue; }
-        if (d < ScriptRules::kAmbushArmNear) { a.active = false; a.satisfied = false; continue; }
-        a.satisfied = a.armed && !a.active;
+        if (d > ScriptRules::kAmbushArmFar) { a.active = false; a.satisfied = false; continue; }
+        // Near bound only prevents activation. Existing ambushes remain
+        // active until ambushFar (>600), king.exe 0x42c3f6..0x42c415.
+        if(a.active)continue;
+        if (d < ScriptRules::kAmbushArmNear) continue;
+        a.satisfied = a.armed && ambushRoadApproach(a,st);
         if (a.satisfied) {
             ++a.fires;
             a.active = true;
-            a.armed = false;        // another pass requires leaving beyond 600 u
+            // Activation only changes active (+0x1c), not load eligibility (+0xf0).
+            // king.exe 0x42c469..0x42c4c4: next is a conditional hand-off,
+            // not a command to activate every linked ambush.
+            for(const auto& id:a.def->next) {
+                auto paired=std::find_if(ambushes_.begin(),ambushes_.end(),
+                    [&](const AmbushState& candidate) {return candidate.def->id==id;});
+                if(paired==ambushes_.end()||!paired->active)continue;
+                const double pd=distTo(paired->x,paired->z,st,paired->y);
+                if(!paired->havePos||pd<ScriptRules::kAmbushArmNear||
+                   pd>ScriptRules::kAmbushArmFar||!ambushRoadApproach(*paired,st)) {
+                    paired->active=false;paired->satisfied=false;
+                }
+            }
         }
     }
 }

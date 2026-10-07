@@ -704,11 +704,8 @@ bool Traffic::inView(float x, float z) const {
 
 bool Traffic::relocate(Car& c, float px, float pz, float radius) {
     if (edges_.empty()) return false;
+    if(inView(c.x,c.z))return false; // Never visibly remove the source car either.
     const float r2 = radius > 0.0f ? radius * radius : std::numeric_limits<float>::max();
-    int fallbackEdge = -1;
-    float fallbackD = -1.0f;
-    float fs = 0.0f;
-    int fdir = 1;
     for (int t = 0; t < kRelocateTries; ++t) {
         const int ei = nextInt((int)edges_.size());
         if (!canUseEdge(c.model, ei)) continue;
@@ -718,9 +715,7 @@ bool Traffic::relocate(Car& c, float px, float pz, float radius) {
         const int dir = (nextU32() & 1u) ? 1 : -1;
         const float s = (0.15f + 0.7f * nextFloat()) * e.len;
         if (occupied(ei, dir, s, kSpawnGap)) continue;   // never drop a car into traffic
-        // Prefer a spot the player cannot see; remember the farthest candidate
-        // (outside the streaming radius anyway) for the case where the whole
-        // neighbourhood is in view.
+        // Streaming may be deferred, but must never teleport into view.
         float sx, sh, sz, sfx, sfz;
         sample(ei, dir, s, sx, sh, sz, sfx, sfz);
         // A relocation is a *streaming* move: it must not reappear within sight
@@ -730,33 +725,12 @@ bool Traffic::relocate(Car& c, float px, float pz, float radius) {
         // one on a neighbouring edge is a permanent overlap, so the world-space
         // clearance is checked as well.
         if (!worldClear(sx, sz, &c, kSpawnClear)) continue;
-        const float d2p = dist2(sx, sz, player_.valid ? player_.x : px,
-                                player_.valid ? player_.z : pz);
-        if (inView(sx, sz)) {
-            if (d2p > fallbackD) { fallbackD = d2p; fallbackEdge = ei; fs = s; fdir = dir; }
-            continue;
-        }
+        if (inView(sx, sz)) continue;
         placeOn(c, ei, dir, s);
         newDestination(c, c.x, c.z);
         return true;
     }
-    if (fallbackEdge >= 0) {                 // everything nearby is in view: farthest
-        placeOn(c, fallbackEdge, fdir, fs);
-        newDestination(c, c.x, c.z);
-        return true;
-    }
-    // Fallback: the nearest edge, so a car is never left without a road.
-    int best = -1;
-    float bd = std::numeric_limits<float>::max();
-    for (int i = 0; i < (int)edges_.size(); ++i) {
-        if (!canUseEdge(c.model, i)) continue;
-        const float d = distanceToEdge(i, px, pz);
-        if (d < bd) { bd = d; best = i; }
-    }
-    if (best < 0) return false;
-    placeOn(c, best, 1, 0.5f * edges_[best].len);
-    newDestination(c, c.x, c.z);
-    return true;
+    return false; // Keep the existing valid road position and retry later.
 }
 
 void Traffic::spawn(float px, float pz, float radius, int count) {
@@ -789,6 +763,7 @@ void Traffic::spawn(float px, float pz, float radius, int count) {
             const float s = (0.1f + 0.8f * nextFloat()) * edges_[ei].len;
             if (occupied(ei, dir, s, kSpawnGap)) continue;   // keep spawn gaps honest
             placeOn(c, ei, dir, s);
+            if (player_.valid && dist2(c.x,c.z,player_.x,player_.z)<kRelocateMin*kRelocateMin) continue;
             bool overlaps = false;
             for (const Car& other : cars_) {
                 float nx = 0, nz = 0;
@@ -1018,7 +993,6 @@ float Traffic::playerLeaderCap(const Car& c, float& fx, float& fz) const {
     const Body cb = bodyOf(c.model);
     if (std::fabs(lat) > cb.radius + player_.radius + 0.6f) return 1e9f;
     const float gap = along - 0.5f * (cb.length + player_.length);
-    if (gap > 14.0f) return 1e9f;
     float cap = std::max(0.0f, (gap - kStandGap) * kPlayerSlow);
     cap = std::min(cap, stopCap(gap));                     // brake in time
     const float pv = player_.vx * fx + player_.vz * fz;    // player speed along us
@@ -1383,8 +1357,7 @@ void Traffic::update(float dt, float px, float pz, float radius) {
             if (laneDistance(c) > offRoadLimit_) ++stats_.offRoadFrames;
         }
         if (haveRadius && dist2(c.x, c.z, px, pz) > r2) { // left the player's bubble
-            ++stats_.respawns;
-            relocate(c, px, pz, radius);
+            if(relocate(c, px, pz, radius))++stats_.respawns;
             prevX_[i] = c.x;
             prevZ_[i] = c.z;
             prevH_[i] = c.h;
@@ -1432,8 +1405,7 @@ void Traffic::update(float dt, float px, float pz, float radius) {
                 planTurn(c);
             } else {                                     // then: re-spawn near the player
                 c.recoveries = 0;
-                ++stats_.respawns;
-                relocate(c, px, pz, radius);
+                if(relocate(c, px, pz, radius))++stats_.respawns;
                 prevX_[i] = c.x;
                 prevZ_[i] = c.z;
                 prevH_[i] = c.h;

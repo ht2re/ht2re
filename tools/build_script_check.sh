@@ -11,6 +11,9 @@ set -e
 cd "$(dirname "$0")/.."
 mkdir -p tools/out
 
+c++ -std=c++17 -O1 -I src -o tools/out/script_rng_test tools/script_rng_test.cpp
+./tools/out/script_rng_test
+
 echo "== building tools/out/script_selftest"
 c++ -std=c++17 -O1 -I src -o tools/out/script_selftest \
     tools/script_selftest.cpp \

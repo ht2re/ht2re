@@ -192,8 +192,12 @@ void Menu::handleKey(int key) {
             else if (page_ == "records") activated_ = "recor";
             else if (page_ == "multi") { activated_ = "multi"; page_.clear(); }
             else page_.clear();
+            return;
         }
-        return;
+        // Ordinary cards do not trap focus. Arrows return to the surrounding
+        // menu and move selection; shortcut keys can switch cards directly.
+        if(key==SDLK_UP||key==SDLK_DOWN||key==SDLK_LEFT||key==SDLK_RIGHT)
+            page_.clear();
     }
     switch (key) {
         case SDLK_UP:    sel_ = (sel_ - 1 + n) % n; break;
@@ -285,6 +289,13 @@ void Menu::handlePad(PadButton b) {
     }
 }
 
+void Menu::setViewport(int w,int h) {
+    vpW_=std::max(1,w);vpH_=std::max(1,h);
+    scale_=std::min((float)vpW_/VW,(float)vpH_/VH);
+    offX_=((float)vpW_-VW*scale_)*0.5f;
+    offY_=((float)vpH_-VH*scale_)*0.5f;
+}
+
 void Menu::handleMouse(float mx, float my, bool click) {
     mouseX_ = mx;
     mouseY_ = my;
@@ -319,7 +330,7 @@ void Menu::handleMouse(float mx, float my, bool click) {
         }
         return;
     }
-    if (!page_.empty()) return;
+    // The visible outer sockets remain clickable while a non-modal card is open.
     int hit = hitTest(vx, vy);
     if (hit >= 0) {
         sel_ = hit;
@@ -372,11 +383,7 @@ void Menu::camera(float& x, float& y, float& z, float& yaw, float& pitch) const 
 }
 
 void Menu::draw(Renderer& r, Font& font) {
-    vpW_ = r.width_;
-    vpH_ = r.height_;
-    scale_ = std::min((float)vpW_ / VW, (float)vpH_ / VH);
-    offX_ = (vpW_ - VW * scale_) * 0.5f;
-    offY_ = (vpH_ - VH * scale_) * 0.5f;
+    setViewport(r.width_,r.height_);
     auto X = [&](float vx) { return offX_ + vx * scale_; };
     auto Y = [&](float vy) { return offY_ + vy * scale_; };
 

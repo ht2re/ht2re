@@ -94,6 +94,7 @@ public:
     void addMoney(long d) { money_ += d; }
     void setMoney(long m) { money_ = m; }
     size_t delivered() const { return delivered_; }
+    size_t loadStateRevision() const { return loadStateRevision_; }
     // GAME.CNF counters as shipped: forsale, forsale_stolen, forsale_used,
     // forhire, missions, fuel, semitrailers, containers, parkings.
     const std::map<std::string, long>& counters() const { return counters_; }
@@ -194,6 +195,7 @@ private:
     float startX_ = 0, startZ_ = 0;
     long money_ = kStartMoney;
     size_t delivered_ = 0;
+    size_t loadStateRevision_ = 0;
     size_t late_ = 0;
     std::string playerModel_, playerId_;
     int playerVariant_ = 0;
