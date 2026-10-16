@@ -80,6 +80,24 @@ public:
         std::vector<uint32_t> idx;
     };
 
+    // One authored collision proxy - the `hit_obj_*` / `hit_road_*` containers.
+    // They are never drawn: the engine collides with *these* shapes, not with the
+    // rendered meshes (docs/hit_proxies.md has the field layout and the evidence).
+    struct HitProxy {
+        std::string name;            // hit_obj_ap_048
+        std::string object;          // obj_ap_048, the visible object it describes
+        std::string linkAnchor;      // subtag 18: 12-byte anchor name
+        std::string linkTarget;      // subtag 18: 12-byte container name ("" = none)
+        std::vector<float> poly;     // subtag 20, >=3 points: x,z,y triplets
+        std::vector<float> segments; // subtag 20 with 2 points: x0,z0,x1,z1
+        std::vector<float> planes;   // subtag 9: nx, nz, ny, d (4 floats per plane)
+        float yMin = 0.0f;
+        bool haveBottom = false;     // subtag 12 present
+    };
+    const std::vector<HitProxy>& hitProxies() const { return hitProxies_; }
+    // Filled by buildScene()/buildNamedScene().
+    void collectHitProxies();
+
     // Placed instance of a container: the game's scene files keep object
     // geometry in local coordinates and place it with subtag-24 anchors via
     // subtag-18 links ("<Anchor> -> <Container>").
@@ -156,6 +174,7 @@ private:
     std::vector<Mesh> meshList;
     std::vector<Face> faceList;
     std::vector<SubMesh> subs;
+    std::vector<HitProxy> hitProxies_;
     size_t consumedBytes = 0, totalBytes = 0;
     float bbMin[3] = {1e30f, 1e30f, 1e30f};
     float bbMax[3] = {-1e30f, -1e30f, -1e30f};

@@ -202,9 +202,11 @@ bodies touch) and the unit normal from A to B.
 * `tools/collision_probe.py --compare-cpp tools/out/cpp_grid.bin` — an independent Python
   re-implementation (parser `tools/b3d_full.py`, own walker mirroring `B3D::buildFrom`)
   rasterises the same rule and is diffed cell-by-cell against the C++ grid:
-  **23 889 SubMeshes and 211 730 blocking triangles in both, 546 differing cells out of
-  103.3 M (0.0005 %)**.  The residue is float32-vs-float64 rounding: 48 triangles sit within
-  0.001 of the 0.8 orientation threshold and flip in one of the two implementations.
+  **23 889 SubMeshes and 138 210 blocking triangles in both, 263 differing cells out of
+  103.2 M (0.0003 %)**.  The residue is float32-vs-float64 rounding: triangles sitting within
+  0.001 of the 0.8 orientation threshold, and coordinates landing on opposite sides of a
+  cell boundary.  (Before `mat_forest*` became scenery - see 6 - the same measurement gave
+  211 730 triangles / 546 cells; the three numbers move together.)
   (The Python probe computes the normal in float32 too, which removes the triangle-count
   difference; the residual 546 cells are coordinates landing on opposite sides of a cell
   boundary.)
@@ -224,9 +226,46 @@ SubMeshes on link-heavy tiles (aa, ad, aj, al, am).
   may still block another level. Player circle/sweep queries now accept
   `bottom, top` after the existing arguments and clip the actual wall triangles;
   callers omitting these parameters retain the old occupancy-grid behavior.
-* **Steep terrain blocks.**  `mat_mount*`, `mat_slope*`, forest and swamp billboards with
-  `|n_h| ≤ 0.8` are solid, so hillsides and dense forest are natural barriers.  This follows
-  the brief's "block the rest"; adding `mount|slope` to `GROUND_MAT` would open them up.
+* **Steep terrain blocks.**  `mat_mount*`, `mat_slope*`, swamp billboards and individual
+  `mat_tree*` billboards with `|n_h| ≤ 0.8` are solid, so hillsides and lone trees are
+  natural barriers.  This follows the brief's "block the rest"; adding `mount|slope` to
+  `GROUND_MAT` would open them up.
+* **`mat_forest*` does not block (2026-10-16).**  Those are scenery billboards: a single
+  vertical quad tens of metres across used to paint a forest block.  Solid they put
+  invisible walls straight across roads - `ap.b3d`'s `obj_ap_048` spans
+  `x[-3295..-3200] z[-4701..-4600]` and crossed the apron road 80 m west of the
+  GAME.CNF start, so the truck could not leave the airport.  The engine's real collision
+  is the authored `hit_obj_*` / `hit_road_*` geometry, which the port still does not use:
+  those containers are linked (subtag 18) and carry subtag-40 records
+  (`AAhitTerrain`), so their semantics are a separate reverse-engineering task.
+  Individual `mat_tree*` objects keep blocking.  Reproduce with
+  `tools/out/wall_probe original/ENV -3100,-4625` (see 7).
+  **The proxies are decoded now** - see [hit_proxies.md](hit_proxies.md): a
+  `hit_obj_*` container holds footprint polygons (subtag 20, count x (x,z,y)),
+  face planes (subtag 9, `n·p + d = 0` with the normal stored `(x,z,y)`), the
+  vertical bottom (subtag 12, `params[7] = -y_min`) and links (subtag 18) to real
+  containers (`STOS_walls`, `benzo_hit`, `store_*_hit`, ...).  Validated
+  statistically: 99.2 % of the polygons touch their object's bbox edge, 86.0 % of
+  the planes are tangent to it.
+* **How much of the road really is blocked - measured (2026-10-16).**
+  `tools/out/road_block_audit original` queries every `.way` polyline sample against the
+  blocking triangles (the same two filters) and splits the hits by whether the authored
+  asphalt is under them:
+
+  | | samples | share |
+  |---|---|---|
+  | all `.way` samples | 9 853 | 100 % |
+  | inside blocking geometry | 725 | 7.36 % |
+  | ... **on authored asphalt** | 205 | **2.08 %** |
+
+  So most `blocked` samples are `.way` polylines crossing yards, parking rows and depots,
+  where a fence/pillar legitimately stands.  The 205 on-asphalt cases are thin objects
+  whose geometry clips the carriageway - `mat_confence` 21 %, `mat_fence*` 29 %,
+  `mat_tun_dn`/`mat_tun_w0` 8 % (tunnel walls), `tree*`/`mat_tree89` 13 %,
+  `mat_bricks` 4 %, bridge rails (`mat_bridge_7`, `mat_road_fence`, `mat_rfence`,
+  `mat_ograjdenie_bridge`, `mat_br_*`) 5 %.  With the ~1 m conservative cell inflation
+  plus the body radius a truck can catch those, which is the remaining "invisible wall"
+  report.  The authored `hit_obj_*` proxies are the faithful fix.
 * **Wall inflation.**  Conservative cell marking makes every wall ~1 m thicker than it is
   (plus the body radius in the query), so a truck needs `1 m + r` clearance to pass.
 * **`hit_*` proxies are not used.**  `B3D::buildScene` skips the game's own collision-only
@@ -245,6 +284,18 @@ tools/out/collision_check                        # build stats, points, .way che
 tools/out/collision_check --dump tools/out/cpp_grid.bin   # raw grid for the Python diff
 tools/out/collision_check --only aa.b3d --list out.txt    # per-SubMesh dump
 tools/out/collision_check --probe X Z            # SubMeshes whose bbox contains (X,Z)
+
+# Which authored triangle makes a point solid?  Mirrors the C++ filters and prints
+# every blocking triangle covering the point (material + footprint + up component):
+c++ -O2 -std=c++17 -Isrc tools/wall_probe.cpp src/world/B3D.cpp -o tools/out/wall_probe
+tools/out/wall_probe original/ENV -3100,-4625     # -> mat_forest1 obj_ap_048
+tools/out/wall_probe original/ENV --hits          # hit_* proxy containers per tile
+tools/out/wall_probe original/ENV --dump original/ENV/ap.b3d   # raw proxy params
+
+# Which material blocks the road network, and how much of it is really on asphalt:
+c++ -O2 -std=c++17 -Isrc tools/road_block_audit.cpp src/world/B3D.cpp src/world/Way.cpp \
+    -o tools/out/road_block_audit
+tools/out/road_block_audit original
 
 # Python reproduction over original/ENV/*.b3d (parser: tools/b3d_full.py)
 python3 tools/collision_probe.py                 # the table above + grid stats

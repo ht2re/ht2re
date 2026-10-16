@@ -727,10 +727,67 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked, int 
     } w{this, skipLinked, bodyState};
     XForm ident;
     for (const Node* n : roots) w.go(*n, -1, ident, 0);
+    collectHitProxies();
 
     LOG("b3d scene%s: %zu submeshes, %d placements, bbox (%.1f %.1f %.1f)..(%.1f %.1f %.1f)",
         sceneName_.empty() ? "" : (" '" + sceneName_ + "'").c_str(),
         subs.size(), w.instances, bbMin[0], bbMin[1], bbMin[2], bbMax[0], bbMax[1], bbMax[2]);
+}
+
+// The authored collision proxies: top-level `hit_*` containers hold the shapes the
+// engine collides with (docs/hit_proxies.md).  They are never drawn, so this runs
+// as its own walk over the record tree and does not disturb the render list.
+void B3D::collectHitProxies() {
+    hitProxies_.clear();
+    if (d.empty()) return;
+    struct Walker {
+        B3D* self;
+        void go(const Node& n) {
+            if (n.name.rfind("hit_", 0) == 0 && !n.kids.empty()) {
+                HitProxy p;
+                p.name = n.name;
+                const std::string rest = n.name.substr(4);        // obj_ap_048 / road_ap_048
+                if (rest.rfind("obj_", 0) == 0) p.object = "obj_" + rest.substr(4);
+                else if (rest.rfind("road_", 0) == 0) p.object = "obj_" + rest.substr(5);
+                else p.object = rest;
+                for (const Node& k : n.kids) {
+                    if (k.subtag == 20) {
+                        // 8 header dwords, then count x (x, z, y); count = header[4]
+                        const size_t base = k.off + 40;
+                        if (base + 32 > self->d.size()) continue;
+                        uint32_t cnt = 0;
+                        memcpy(&cnt, self->d.data() + base + 16, 4);
+                        if (cnt < 2 || cnt > 256) continue;
+                        if (base + 32 + 12 * (size_t)cnt > self->d.size()) continue;
+                        if (base + 32 + 12 * (size_t)cnt > k.end) continue;
+                        for (uint32_t v = 0; v < cnt; ++v) {
+                            float p3[3];
+                            memcpy(p3, self->d.data() + base + 32 + 12 * (size_t)v, 12);
+                            if (cnt == 2) {
+                                p.segments.push_back(p3[0]);
+                                p.segments.push_back(p3[1]);
+                            } else {
+                                p.poly.push_back(p3[0]);
+                                p.poly.push_back(p3[1]);
+                                p.poly.push_back(p3[2]);
+                            }
+                        }
+                    } else if (k.subtag == 9 && k.params.size() >= 8) {
+                        for (int i = 4; i < 8; ++i) p.planes.push_back(bitsToFloat(k.params[i]));
+                    } else if (k.subtag == 12 && k.params.size() >= 8) {
+                        p.yMin = -bitsToFloat(k.params[7]);           // params[7] = -y_min
+                        p.haveBottom = true;
+                    } else if (k.subtag == 18 && k.params.size() >= 20) {
+                        p.linkAnchor = paramsName(k.params, 4);
+                        p.linkTarget = paramsName(k.params, 12);
+                    }
+                }
+                self->hitProxies_.push_back(std::move(p));
+            }
+            for (const Node& k : n.kids) go(k);
+        }
+    } w{this};
+    for (const Node& n : topNodes) w.go(n);
 }
 
 } // namespace ht2

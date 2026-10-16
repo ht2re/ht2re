@@ -42,6 +42,16 @@ public:
     void build(const std::vector<B3D::SubMesh>& meshes);
     // Same, with an explicit grid cell size (default kDefaultCellSize metres).
     void build(const std::vector<B3D::SubMesh>& meshes, float cellSize);
+    // Build from the authored collision proxies (docs/hit_proxies.md).  A proxy's
+    // footprint polygon IS the authored solid shape of its object, so the rendered
+    // mesh of that object must not block again (same obstacle, drawn): a submesh
+    // whose centre lies inside such a polygon is skipped.  Everything not covered
+    // by a proxy keeps the visible-mesh rule, so the world never gets holes.
+    void build(const std::vector<B3D::SubMesh>& meshes,
+               const std::vector<B3D::HitProxy>& proxies);
+    // The proxies' footprint rings in world (x, z) - for diagnostics and tests.
+    static std::vector<std::vector<std::pair<float, float>>>
+    proxyRings(const std::vector<B3D::HitProxy>& proxies);
     void clear();
     bool empty() const { return bits_.empty(); }
     size_t cells() const { return solidCells_; }
@@ -121,6 +131,10 @@ private:
     std::vector<size_t> wideWalls_; // pathological large footprints, no huge bin allocation
 
     std::vector<uint64_t> bits_;    // 1 = solid cell, ix * nz_ + iz
+    // 1 when a mesh's submesh is covered by an authored proxy polygon: the proxy is
+    // the authored shape of that object, so its rendered geometry must not block too.
+    std::vector<uint8_t> skipMesh_;
+    void recountSolids();
     float cell_ = 1.0f, x0_ = 0.0f, z0_ = 0.0f;
     int nx_ = 0, nz_ = 0;
     size_t solidCells_ = 0;

@@ -51,6 +51,15 @@ const char* const kGroundMat[] = {
     "sidewalk", "kerb", "curb", "trotoar", "trotuar", "stoika", "stoyanka",
     "parking", "runway", "taxiway", "apron", "swamp", "bshadow", "river",
     "tonnel", "zont", "bottom_bridge", "bridge_0",
+    // `mat_forest*` are scenery billboards: single vertical quads tens of metres
+    // across used to paint a forest block, not obstacles.  Treating them as solid
+    // put invisible walls straight across roads (ap.b3d's `obj_ap_048` crosses the
+    // apron road 80 m west of the GAME.CNF start).  The engine's real collision is
+    // the authored `hit_obj_*`/`hit_road_*` proxies, which the port does not decode
+    // yet (their containers are link targets and carry subtag-40 records); until
+    // they are, scenery must not block.  Individual `mat_tree*` billboards stay
+    // solid, as docs/collision.md documents.
+    "forest",
 };
 const char* const kSolidMat[] = {
     "stolb", "pillar", "column", "kolonn", "wall", "fence", "confence",
@@ -234,7 +243,10 @@ void Collision::build(const std::vector<B3D::SubMesh>& meshes, float cellSize) {
     bits_.assign((stats_.gridCells + 63) / 64, 0ull);
 
     // --- pass 2: rasterise the wall-like triangles --------------------------
-    for (const B3D::SubMesh& sm : meshes) {
+    for (size_t si = 0; si < meshes.size(); ++si) {
+        const B3D::SubMesh& sm = meshes[si];
+        // Only the proxy overload fills this, for this very mesh list.
+        if (skipMesh_.size() == meshes.size() && skipMesh_[si]) continue;
         if (isGroundMaterial(sm.material)) continue;
         if (submeshExtent(sm) < kDecalMinExtent) continue;
         const size_t n = sm.idx.size();
@@ -296,15 +308,96 @@ void Collision::build(const std::vector<B3D::SubMesh>& meshes, float cellSize) {
         }
     }
 
-    solidCells_ = 0;
-    for (uint64_t w : bits_) solidCells_ += (size_t)popcount64(w);
-    stats_.cells = solidCells_;
+    recountSolids();
     LOG("collision: %zu solid triangles -> grid %dx%d @ %.2f m (%.1f MB), "
         "%zu solid cells (%.2f%% of grid); skipped %zu ground + %zu flat of %zu "
         "submeshes",
         stats_.triangles, nx_, nz_, cell_, (double)bits_.size() * 8.0 / 1e6,
         solidCells_, stats_.gridCells ? 100.0 * (double)solidCells_ / (double)stats_.gridCells : 0.0,
         stats_.ground, stats_.flat, stats_.submeshes);
+}
+
+void Collision::recountSolids() {
+    solidCells_ = 0;
+    for (uint64_t w : bits_) solidCells_ += (size_t)popcount64(w);
+    stats_.cells = solidCells_;
+}
+
+std::vector<std::vector<std::pair<float, float>>>
+Collision::proxyRings(const std::vector<B3D::HitProxy>& proxies) {
+    std::vector<std::vector<std::pair<float, float>>> rings;
+    for (const B3D::HitProxy& p : proxies) {
+        if (p.poly.size() < 9) continue;                    // >= 3 points
+        std::vector<std::pair<float, float>> r;
+        for (size_t i = 0; i + 2 < p.poly.size(); i += 3) r.push_back({p.poly[i], p.poly[i + 1]});
+        if (r.size() >= 3) rings.push_back(std::move(r));
+    }
+    return rings;
+}
+
+void Collision::build(const std::vector<B3D::SubMesh>& meshes,
+                      const std::vector<B3D::HitProxy>& proxies) {
+    const auto rings = proxyRings(proxies);
+    // A submesh whose centre is inside an authored footprint is that same object
+    // drawn: the proxy already carries its solid shape.
+    skipMesh_.assign(meshes.size(), 0);
+    size_t covered = 0;
+    for (size_t i = 0; i < meshes.size(); ++i) {
+        const float cx = meshes[i].center[0], cz = meshes[i].center[1];
+        for (const auto& r : rings) {
+            float x0 = r[0].first, x1 = x0, z0 = r[0].second, z1 = z0;
+            for (const auto& q : r) {
+                x0 = std::min(x0, q.first); x1 = std::max(x1, q.first);
+                z0 = std::min(z0, q.second); z1 = std::max(z1, q.second);
+            }
+            if (cx < x0 || cx > x1 || cz < z0 || cz > z1) continue;
+            bool in = false;
+            for (size_t a = 0, b = r.size() - 1; a < r.size(); b = a++) {
+                if ((r[a].second > cz) != (r[b].second > cz) &&
+                    cx < (r[b].first - r[a].first) * (cz - r[a].second) /
+                             (r[b].second - r[a].second) + r[a].first)
+                    in = !in;
+            }
+            if (in) { skipMesh_[i] = 1; ++covered; break; }
+        }
+    }
+    build(meshes, defaultCellSize());
+
+    // ... and rasterise the authored footprints into the very same grid.
+    size_t painted = 0;
+    for (const auto& r : rings) {
+        float x0 = r[0].first, x1 = x0, z0 = r[0].second, z1 = z0;
+        for (const auto& q : r) {
+            x0 = std::min(x0, q.first); x1 = std::max(x1, q.first);
+            z0 = std::min(z0, q.second); z1 = std::max(z1, q.second);
+        }
+        const int i0 = std::max(0, (int)std::floor((x0 - x0_) / cell_));
+        const int i1 = std::min(nx_ - 1, (int)std::floor((x1 - x0_) / cell_));
+        const int j0 = std::max(0, (int)std::floor((z0 - z0_) / cell_));
+        const int j1 = std::min(nz_ - 1, (int)std::floor((z1 - z0_) / cell_));
+        for (int i = i0; i <= i1; ++i) {
+            const float px = x0_ + (i + 0.5f) * cell_;
+            if (px < x0 || px > x1) continue;
+            for (int j = j0; j <= j1; ++j) {
+                const float pz = z0_ + (j + 0.5f) * cell_;
+                if (pz < z0 || pz > z1) continue;
+                const size_t cellIdx = (size_t)i * (size_t)nz_ + (size_t)j;
+                if (bit(cellIdx)) continue;
+                bool in = false;
+                for (size_t a = 0, b = r.size() - 1; a < r.size(); b = a++) {
+                    if ((r[a].second > pz) != (r[b].second > pz) &&
+                        px < (r[b].first - r[a].first) * (pz - r[a].second) /
+                                 (r[b].second - r[a].second) + r[a].first)
+                        in = !in;
+                }
+                if (in) { setBit(cellIdx); ++painted; }
+            }
+        }
+    }
+    recountSolids();
+    LOG("collision: %zu authored proxy footprints painted %zu cells; %zu submeshes "
+        "were covered by a proxy and skipped by the visible-mesh rule",
+        rings.size(), painted, covered);
 }
 
 bool Collision::blockedHeight(float x, float z, float r, float bottom, float top) const {

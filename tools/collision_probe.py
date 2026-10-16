@@ -45,7 +45,7 @@ HORIZONTAL_UP = 0.8        # |up| above this = ground/roof/deck -> not a wall
 ABSURD_H = 1000.0          # sentinel vertices (|height| beyond this)
 ABSURD_XZ = 20000.0
 MAX_DEPTH = 8              # sub-18 link nesting guard (ht2::B3D::buildFrom)
-CACHE_VERSION = 'v2'       # bump when the assembler changes
+CACHE_VERSION = 'v3'       # bump when the assembler changes
 
 # Materials that are drivable surfaces (roads/aprons/yards/water) or decals.
 # A submesh whose material matches is never solid -- unless it also matches
@@ -54,7 +54,11 @@ GROUND_MAT = re.compile(
     r'road|grass|beton|concrete|gravel|zebra|spl|ground|ter_|water|cross|mark|'
     r'asphalt|sand|dirt|pavement|sidewalk|kerb|curb|trotoar|trotuar|stoika|'
     r'stoyanka|parking|runway|taxiway|apron|swamp|bshadow|river|tonnel|'
-    r'zont|bottom_bridge|bridge_0',
+    r'zont|bottom_bridge|bridge_0|'
+    # mat_forest* are scenery billboards (single vertical quads used to paint a
+    # forest block), not obstacles; making them solid put invisible walls across
+    # roads (ap.b3d obj_ap_048 crosses the apron road west of the start).
+    r'forest',
     re.I)
 SOLID_MAT = re.compile(
     r'stolb|pillar|column|kolonn|wall|fence|confence|ograjdenie|rama|'
