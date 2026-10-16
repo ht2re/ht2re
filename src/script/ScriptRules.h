@@ -5,6 +5,7 @@
 #include <vector>
 #include "GameData.h"
 #include "EngineRandom.h"
+#include "LoadGuilt.h"
 #include "../world/Way.h"
 
 namespace ht2 {
@@ -249,8 +250,12 @@ public:
     void setNodePassRadius(double r) { passRadius_ = r; }
     void setSeed(uint32_t s) { rng_.reset(s); }
     // king.exe markAmbushes (0x42c0b0), invoked on load-state changes.
-    // These booleans are the recovered predicates, not guessed player fields.
-    void onLoadStateChanged(bool mafiaLoadEligible, bool mafiaPlayerEligible);
+    // Low-level markAmbushes entry, not the entire load-change callback.
+    void onLoadStateChanged(bool mafiaHostility, bool mafiaShareEligible);
+    // Restored accountForGuilt followed by markAmbushes on the SAME RNG.
+    // Other load-change helpers, company simulation and initial timing remain
+    // separate; App's old bool adapter cannot supply this complete raw state.
+    void onLoadStateChanged(LoadGuiltState& state, double mafiaAccountValue);
     // The weatherandtime probe `--script-report` prints the engine's own
     // badness curve for (clearness w[+0x220], amp w[+0x78], phase w[+0x68]).
     void setBadnessProbe(double clearness, double amp, double phase) {

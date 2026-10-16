@@ -107,11 +107,16 @@ uint32_t ScriptRuntime::rnd(uint32_t bound) {
     return rng_.bounded(bound);
 }
 
-void ScriptRuntime::onLoadStateChanged(bool mafiaLoadEligible,bool mafiaPlayerEligible) {
+void ScriptRuntime::onLoadStateChanged(LoadGuiltState& state,double mafiaAccountValue) {
+    accountForLoadGuilt(state,rng_);
+    onLoadStateChanged(mafiaAccountValue>0.0||state.mafiaWanted,state.currentPlayerShare>0.2);
+}
+
+void ScriptRuntime::onLoadStateChanged(bool mafiaHostility,bool mafiaShareEligible) {
     for(auto& a:ambushes_) {
         a.armed=false;
         const bool police=a.def->klass=="POLICE";
-        const bool mafia=a.def->klass=="MAFIA"&&mafiaLoadEligible&&mafiaPlayerEligible;
+        const bool mafia=a.def->klass=="MAFIA"&&mafiaHostility&&mafiaShareEligible;
         if(police||mafia)a.armed=rnd(1000000u)<300000u;
     }
 }

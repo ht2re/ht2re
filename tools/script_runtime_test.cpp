@@ -29,6 +29,29 @@ static void selectEligible(ScriptRuntime& rt) {
 int main(int argc,char** argv) {
     const std::string data=argc>1?argv[1]:"original";
     GameData original;if(!original.load(data))return 1;
+    {
+        GameData gd;
+        for(const char* klass:{"MAFIA","POLICE","POLICE","MAFIA"}) {
+            GameData::Ambush a;a.klass=klass;gd.ambushes.push_back(a);
+        }
+        ScriptRuntime rt(gd);EngineRandom expected;
+        for(double share:{0.0,.15,.2,std::nextafter(.2,1.0),1.0}) {
+            LoadGuiltState state;state.currentPlayerShare=share;state.containerFlags=2;
+            state.cargo={{0,true,2,0,1},{0,false,0,12000,-1}};
+            auto reference=state;
+            accountForLoadGuilt(reference,expected);
+            rt.onLoadStateChanged(state,1.0);
+            bool match=state.illegalWanted==reference.illegalWanted&&
+                       state.mafiaWanted==reference.mafiaWanted&&
+                       state.suspiciousLoad==reference.suspiciousLoad;
+            for(const auto& a:rt.ambushes()) {
+                const bool eligible=a.def->klass=="POLICE"||share>.2;
+                const bool armed=eligible&&expected.bounded(1000000)<300000;
+                match&=a.armed==armed;
+            }
+            check(match,"guilt scan and ambush marking share RNG with strict numeric rating gate");
+        }
+    }
     for(bool load:{false,true})for(bool player:{false,true}) {
         GameData gd;
         for(const char* klass:{"MAFIA","POLICE","POLICE","MAFIA"}) {

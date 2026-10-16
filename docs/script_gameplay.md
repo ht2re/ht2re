@@ -522,13 +522,15 @@ activate partners automatically.
 **Load-change correction 2026-10-07:** `markAmbushes` (`0x42c0b0`, direct
 caller `0x442d74` in `accountForChangeInLoadState`) clears armed first,
 then samples `rnd(1000000)<300000` for POLICE and eligible MAFIA only.
-MAFIA requires `(player+0x218 > 0 OR player+0x201)` and the additional
+MAFIA requires `(double(player+0xE0) > 0 OR byte(player+0xC9))` and the additional
 `player+0x300 > 0.2` predicate. Distance does not arm an ambush; activation
 does not consume armed. The port implements this kernel through
 `onLoadStateChanged` and Economy load revisions, not per-frame sampling.
 Its two MAFIA predicate inputs currently both use the active cargo's
 `formafia` tag: a temporary adapter, not recovered meanings of these fields.
 Initial callback timing, shared PRNG call order and the vehicle pool remain open.
+The first offsets were corrected on 2026-10-15: `add ecx,0xc8` followed by
+`[ecx+0x18]` / `[ecx+1]` means 0xE0 / 0xC9, not 0x218 / 0x201.
 
 ```lisp
 ; A paired mafia roadblock in tile ad: two ambushes of 5 slots each (1325-1329 / 1320-1324),
@@ -2314,7 +2316,8 @@ the strings to show when it closes/opens.
 
 | VA | what it does |
 |----|--------------|
-| `0x42b550` (`ambushArmable`) | distance to the player; `0` if `< 250.0` (`0x64b868`) or `> 600.0` (`0x64b870`); then a road-graph/direction test (`0x4858b0`, hop count `< 2` at `0x42b6ba`) |
+| `0x412d57` | the ambush loader resolves the authored `.way` node position through `getPositionId(dvector3 const & v)` (`0x436900`) and stores the resulting **0x20-byte road position** at `ambush+0x90`; the node position itself lands at `ambush+0x38`. A missing node is `"Fatal error: ambush node not present"` (`0x412d7c`) |
+| `0x42b550` (`ambushArmable`) | the full control flow is decoded in §10.5.1: distance band, the road-graph path gate and the compass direction test |
 | `0x42b4c0` (`ambushFar`) | returns true when the player is beyond **600 u** |
 | `0x42c390` (`updateAmbushes`) | for every ambush: if active and `ambushFar` → `activateAmbush(a, false)` (`0x42bb90`); if inactive and `[+0xf0]` (armed) and `ambushArmable` → `activateAmbush(a, true)`, then deactivate its already-placed cars that the player has left behind |
 | `0x68a970` | the ambush list; `[+0x1c]` = active, `[+0x38..0x50]` = position, `[+0x7c]` = the blocking player, `[+0xdc]` = the spawned cars |
@@ -2322,6 +2325,80 @@ the strings to show when it closes/opens.
 So an ambush **arms between 250 and 600 u** and disarms beyond 600 u — the shipped
 `ambush` forms carry no radius of their own except the optional field 9 (65/85) on 8 forms,
 which is an extra distance parameter for that same test.
+#### 10.5.1 `ambushArmable` — the full control flow (2026-10-16)
+
+```
+if (!player) return false;                          # 0x42b574..0x42b5b9
+d = |ambush.pos(+0x38) - player.pos(+0x270)|;       # 3 doubles, fsqrt @ 0x42b607
+if (d <  250.0) return false;                       # fcom  [0x64b868] @ 0x42b60d
+if (d >  600.0) return false;                       # fcomp [0x64b870] @ 0x42b630
+path = roadPath(ambush.roadPos(+0x90), player.roadPos(+0x28), 1);  # call 0x4858b0 @ 0x42b690
+count = (path.end - path.begin) / 12;               # 0x42b699..0x42b6b8
+if (count < 2) { free(path); return false; }        # cmp edx,2 @ 0x42b6ba (see the note)
+markPath(path);                                     # call 0x484690 @ 0x42b708
+V = roadPositionTangent(ambush.roadPos(+0x90));     # call 0x4390a0 @ 0x42b720
+if (bit1 of [V_obj-0x10]) V = -V;                   # 0x42b72c..0x42b75c
+if (dot(ambush.dirVector(+0x58,+0x60,+0x68), V) > 0)  # fcomp 0.0 [0x64b678] @ 0x42b782
+    { free(path); return true; }                    # mov al,1 @ 0x42b854
+free(path); return false;                           # xor al,al @ 0x42b806
+```
+
+Three details that were **not** in the earlier notes:
+
+* the path must carry **at least two 12-byte entries** (`0x42b6ba`). The entry layout is
+  still unresolved - if an entry is a *node*, two entries mean a single traversed link,
+  so the gate only rejects the degenerate "player is exactly on the ambush node" case.
+* the **return polarity** is `dot > 0` -> **true** (`0x42b78e test ah,0x41` / `je 0x42b81a`
+  falls through to `mov al,1`); a zero or negative dot returns false. The port's
+  `ambushRoadApproach` already returns `(end - from)*dirVec > 0`, i.e. the same polarity.
+* `0x484690` (`ai_trce.cpp`, the trace module) walks the returned path and sets/clears a
+  per-object flag (`or [obj+0x10],0x400` then `and [obj+0x10],~0x400`, and
+  `and byte [obj+8],0xfe`), i.e. it **orients the path**; `0x4390a0` then reads the
+  ambush's road position back out and the reversal bit at `[ptr-0x10]&1` flips the sign of
+  `V`. So `V` is the road tangent **at the ambush's road position, oriented along the
+  travel direction** - the same quantity the port computes as the last hop into the anchor,
+  not a free-world player bearing.
+
+The compass vectors come from the parser the node events use as well
+(`0x413d89..0x413e84`): `NORTH` writes `+1.0` on axis 1 and enum `1`, `SOUTH` `-1.0`/`2`,
+`EAST` `+1.0` on axis 0 and enum `3`, `WEST` `-1.0`/`4`. Axis 1 is world `z`, axis 0 is
+world `x`, which is exactly the port's `NORTH -> dz = +1 ... WEST -> dx = -1` mapping.
+
+Reproduce: `python3 tools/ambush_original_probe.py` (static binary contract, now 50/50) and
+`tools/out/ambush_debug <data-dir> [AMBUSH_ID ...]` (see 10.5.2).
+
+#### 10.5.2 Why three authored ambushes never arm in the port
+
+`tools/ambush_debug.cpp` builds the same road graph the runtime uses and reports, for every
+road sample inside the band, which endpoint of the anchor link the shortest path arrives
+through. On the shipped ENV network (6172 vertices / 7591 edges, **one** connected
+component, 8 dead ends):
+
+| ambush | dir | anchor link | arrival side | `dot(dir, V)` |
+|--------|-----|-------------|--------------|---------------|
+| `AMBUSH_AS_3` | WEST | `(-3782.1,-1288.3) -> (-3775.0,-1293.3)` | always via `b` | `+` -> arms |
+| `AMBUSH_AS_4` | WEST | `(-3767.1,-1203.0) -> (-3775.0,-1206.7)` | always via `b` | `-` -> never arms |
+| `AMBUSH_CC_4` | EAST | `(1863.5, 3407.9) -> (1861.3, 3412.4)` | always via `a` | `-` -> never arms |
+| `M_AMBUSH_BA02` | NORTH | `(-2574.6, 4000.0) -> (-2500.0, 4000.0)` | mostly via `b` | `0` -> never arms |
+
+The anchor link is a *polyline piece*; splitting it at the anchor leaves the arrival side to
+be decided by `min(dist(player->a) + |a-target|, dist(player->b) + |b-target|)`, which
+collapses to "which endpoint of the split is nearer the projection" whenever the player is
+farther than the link length. All in-band samples (1441 for `AS_4`, 1220 for `CC_4`, 16796
+for `BA02`) therefore agree, and the sign follows from `tBest` versus `0.5` rather than from
+the road's orientation. `BA02` is the clearest case: its nearest authored link runs along
+`x` while the form faces `NORTH`, so the strict `dot > 0` of `0x42b782` can *never* hold
+there.
+
+The three `script_runtime_test` checks (`<ID> has executable approach on actual authored RSEG
+network`) assert the stronger claim that *every* authored ambush is armable somewhere in its
+band. That claim is **not** a consequence of the decoded rule, so the checks are left red
+rather than weakened; the missing piece on the port side is the real
+`getPositionId`/`roadPath`/tangent triple (`0x436900` / `0x4858b0` / `0x4390a0`), whose own
+geometry - not the port's nearest-polyline projection - decides the arriving link and its
+orientation.
+
+
 
 ### 10.6 `node` roles
 
