@@ -89,6 +89,12 @@ struct Options {
     // driving pose with the named .way node being crossed.
     float eventRadius = (float)ScriptRules::kNodePassRadius;
     bool collisionProbe = false;   // --collision-probe x,z[,r]
+    // --proxy-collision: build the solids from the authored `hit_*` proxies instead
+    // of the visible meshes.  Off by default: the authors' footprint polygons also
+    // cover areas the player must be able to stand on (the GAME.CNF start is inside
+    // `obj_ap_048`'s polygon), so the records are not a plain solid footprint and
+    // their consumer in king.exe is still being traced (docs/hit_proxies.md).
+    bool proxyCollision = false;
     bool obstaclesOpen = false;    // --obstacles open: hide road-closure geometry
     bool fullscreen = false;       // --fullscreen (handhelds)
     bool noCollision = false;      // --no-collision: disable the solid-geometry test
@@ -137,12 +143,14 @@ struct Options {
     // test hook: start as if "SINGLE PLAYER" was picked
     bool vehicleGiven = false;
     bool spawnGiven = false;
+    bool spawnYawGiven = false;   // --spawn x,z,yaw: the third value was given
     float spawnOverride[3] = {0, 0, 0};   // --spawn x,z[,yaw]
     // --- the original in-game HUD (src/ui/Hud.cpp, src/ui/Map.cpp) ----------
     bool noMap = false;          // --no-map: draw the strip only (panel tests)
     bool mapGiven = false;       // --map: force the map on in a screenshot run
     int fineShot = 0;            // --fine-shot SPEED: show the fine panel, exit
     std::string msgShot;         // --msg-shot TEXT: show the pager window, exit
+    bool msgShotGiven = false;   // ... the flag was given (empty TEXT = hide it)
     std::string jobTime;         // --job-time MM:SS: force the ОСТ.ВРЕМЯ value
     bool jobGiven = false;       // --job: take the nearest job at startup
     float speedFor = 0.0f;       // --speed-limit N: use this limit for the camera
@@ -173,6 +181,8 @@ private:
     B3D menuScene_, worldScene_;
     B3D trucks_;                  // COMMON/TRUCKS.B3D (vehicle models)
     std::vector<B3D::SubMesh> worldMeshes_;   // all ENV tiles merged
+    // The authored collision proxies of those tiles (docs/hit_proxies.md).
+    std::vector<B3D::HitProxy> worldProxies_;
     GroundMap ground_;
     std::vector<std::string> worldTileNames_; // "<dir>/ENV/<tile>" for textures
     void loadWorldTiles();
@@ -193,6 +203,10 @@ private:
     std::string msgText_;
     float msgAge_ = 0.0f;          // seconds since the pager text appeared
     bool msgNew_ = false;          // blink the "new message" icon
+    // --msg-shot capture mode: the frame must show the line it was asked for,
+    // so world messages (node events, obstacles, an ambush firing on the very
+    // first update) must not overwrite the pager while it is held.
+    bool msgHold_ = false;
     // One entry point for the script/node-event/ambush texts (the original's
     // 4-line message ring, drawn in the strip's pager window).
     void pushMessage(const std::string& text, const std::string& kind);
@@ -369,6 +383,12 @@ private:
     // asphalt under them (max / median / p95, and the worst site).
     int trafficWheelProbe();
     void collectWaySegments();          // every .way of every world tile -> waySegs_
+    // Heading (degrees, Vehicle convention: 0 = +z) of the authored RSEG nearest
+    // to (x, z).  king.exe's setPlayerPosition (0x43e610) resolves the start's
+    // road PositionId and the vehicle follows the road there; without this the
+    // truck spawned with yaw 0 and drove straight into whatever the GAME.CNF
+    // start happens to face (at -3020,-4625 that is the store wall 10 m ahead).
+    float roadHeadingAt(float x, float z) const;
 
     std::map<std::string, Way::Node> wayNodes_;   // every named node of every tile
     std::vector<Way::Seg> waySegs_;               // every road segment (for headings)

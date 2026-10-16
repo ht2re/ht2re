@@ -62,6 +62,9 @@ static const char* USAGE =
     "                    900 in fair weather - the original's value)\n"
     "  --buy N           buy vehicle offer N at startup\n"
     "  --collision-probe x,z[,r]  report whether a spot is blocked, exit\n"
+    "  --proxy-collision  build the solids from the authored hit_* proxies instead\n"
+    "                     of the visible meshes (experiment; the polygons are not a\n"
+    "                     solid volume - see docs/hit_proxies.md)\n"
     "  --fullscreen      borderless fullscreen (handhelds)\n"
     "  --accept-job N    accept cargo job N at startup (0 = nearest)\n"
     "  --deliver         complete the active cargo job at the current position\n"
@@ -109,6 +112,7 @@ static const char* USAGE =
     "                    (the speed limit comes from --speed-limit) and exit\n"
     "  --speed-limit N   override the road's speed limit (speed camera / HUD)\n"
     "  --msg-shot TEXT   render one frame with the script message window showing\n"
+    "                    (empty TEXT = hold the pager hidden, test control frame)\n"
     "                    TEXT and the blinking new-message icon, then exit\n";
 
 static bool argIs(const char* a, const char* name) { return strcmp(a, name) == 0; }
@@ -156,6 +160,7 @@ int main(int argc, char** argv) {
         else if (argIs(argv[i], "--view-distance") && i + 1 < argc)
             o.viewDistance = (float)atof(argv[++i]);
         else if (argIs(argv[i], "--no-collision")) o.noCollision = true;
+        else if (argIs(argv[i], "--proxy-collision")) o.proxyCollision = true;
         else if (argIs(argv[i], "--fullscreen")) o.fullscreen = true;
         else if (argIs(argv[i], "--obstacles") && i + 1 < argc) o.obstaclesOpen = (strcmp(argv[++i], "open") == 0);
         else if (argIs(argv[i], "--collision-probe") && i + 1 < argc) {
@@ -221,6 +226,7 @@ int main(int argc, char** argv) {
             int n = sscanf(argv[++i], "%f,%f,%f", &o.spawnOverride[0], &o.spawnOverride[1], &o.spawnOverride[2]);
             if (n < 2) return 1;
             o.spawnGiven = true;
+            o.spawnYawGiven = n >= 3;
         }
         else if (argIs(argv[i], "--movie")) o.movie = true;
         else if (argIs(argv[i], "--movie-clip") && i + 1 < argc) { o.movieName = argv[++i]; o.movie = true; }
@@ -269,7 +275,7 @@ int main(int argc, char** argv) {
             if (sscanf(argv[++i], "%f", &o.speedFor) != 1) return 1;
             o.speedLimitGiven = true;
         }
-        else if (argIs(argv[i], "--msg-shot") && i + 1 < argc) o.msgShot = argv[++i];
+        else if (argIs(argv[i], "--msg-shot") && i + 1 < argc) { o.msgShot = argv[++i]; o.msgShotGiven = true; }
         else { fputs(USAGE, stderr); return 1; }
     }
     App app;

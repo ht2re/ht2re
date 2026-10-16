@@ -36,6 +36,9 @@ static std::string wayTileStem(const std::string& path) {
 
 int App::run(const Options& o) {
     opt_ = o;
+    mirror_.extraWorldPass = [this](float x, float y, float z, float yaw, float pitch) {
+        drawTraffic(x, y, z, yaw, pitch);
+    };
     if (infoModes()) return 0;
     // The one-frame capture harnesses (--msg-shot / --fine-shot) are WORLD
     // frames: they render the strip, the map and the vehicle, so the state has
@@ -43,7 +46,7 @@ int App::run(const Options& o) {
     // just chosen MENU from the default --scene).  Without this the HUD strip,
     // gated on State::World, was never loaded and the frame fell back to the 2D
     // dashboard over the bare terrain mesh.
-    if (opt_.fineShot > 0 || !opt_.msgShot.empty()) state_ = State::World;
+    if (opt_.fineShot > 0 || opt_.msgShotGiven) state_ = State::World;
     // Audio is initialised for interactive runs; the offline modes (--screenshot,
     // --esc-shot, --drive, --probe, --scripts ...) stay silent unless
     // --audio/--menu-music asks for it, so nothing headless ever needs a working
@@ -55,7 +58,7 @@ int App::run(const Options& o) {
     videoAudioWanted_ = audioWanted_;
     if (!loadData()) return 2;
     // ... and again after loadData(), which re-picks the state from --scene.
-    if (opt_.fineShot > 0 || !opt_.msgShot.empty()) state_ = State::World;
+    if (opt_.fineShot > 0 || opt_.msgShotGiven) state_ = State::World;
     if (!font_.initBuiltin(r_)) return 3;
     menu_.load(opt_.dataDir);
     if (!opt_.msg.empty()) menu_.setMessage(opt_.msg, 1e9f);
@@ -289,9 +292,9 @@ int App::run(const Options& o) {
         r_.shutdown();
         return 0;
     }
-    if (!opt_.msgShot.empty()) {
+    if (opt_.msgShotGiven) {
         optsMsgShot();
-        if (getenv("HT2_MSG_GLYPHS")) {
+        if (!opt_.msgShot.empty() && getenv("HT2_MSG_GLYPHS")) {
             // Regression hook: the exact glyph-code string Hud::drawMessage will
             // hand to Font::draw for this pager line (see Font::glyphCodes).
             const std::string g = Font::glyphCodes(msgText_);
@@ -486,7 +489,8 @@ bool App::infoModes() {
     if (opt_.collisionProbe) {
         loadWorldTiles();
         Collision c;
-        c.build(worldMeshes_);
+        if (opt_.proxyCollision && !worldProxies_.empty()) c.build(worldMeshes_, worldProxies_);
+        else c.build(worldMeshes_);
         bool b = c.blocked(opt_.probeX, opt_.probeZ, opt_.probeR);
         LOG("collision-probe: (%.0f, %.0f) r=%.1f -> %s (%zu solid cells, %.1f m grid)",
             opt_.probeX, opt_.probeZ, opt_.probeR, b ? "BLOCKED" : "free", c.cells(), c.cellSize());
@@ -699,6 +703,35 @@ void App::collectWaySegments() {
     }
     LOG("gameplay: %zu road segments from %zu .way files", waySegs_.size(), nFiles);
 }
+// Heading of the authored road nearest to (x, z), in the Vehicle convention
+// (degrees, 0 = +z, matching `yaw = atan2f(bx-ax, bz-az)`).  The nearest *point
+// on the segment* decides the segment (not its midpoint), and the direction is
+// the segment's own storage direction, so the truck lines up with the carriageway
+// exactly like the parked cars do.
+float App::roadHeadingAt(float x, float z) const {
+    float best = std::numeric_limits<float>::max();
+    float heading = 0.0f;
+    for (const auto& sg : waySegs_) {
+        for (size_t k = 0; k + 1 < sg.pts.size(); ++k) {
+            const float ax = (float)sg.pts[k].x, az = (float)sg.pts[k].z;
+            const float bx = (float)sg.pts[k + 1].x, bz = (float)sg.pts[k + 1].z;
+            const float vx = bx - ax, vz = bz - az;
+            const float len2 = vx * vx + vz * vz;
+            if (len2 < 1e-6f) continue;              // degenerate point segment
+            float t = ((x - ax) * vx + (z - az) * vz) / len2;
+            t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+            const float dx = x - (ax + t * vx), dz = z - (az + t * vz);
+            const float d = dx * dx + dz * dz;
+            if (d < best) {
+                best = d;
+                heading = atan2f(vx, vz) * 180.0f / PI;
+            }
+        }
+    }
+    return heading;
+}
+
+
 
 void App::indexWayNodes() {
     if (!wayNodes_.empty()) return;
@@ -838,19 +871,21 @@ void App::refreshPlayerVisual() {
 // already assumes), radius = half the extent along x.  Returns the ground
 // offset as well, so one walk over the vertices gives everything.
 static void modelBody(const std::vector<B3D::SubMesh>& subs, float& length, float& radius,
-                      float& groundOffset) {
-    float lx = 1e30f, hx = -1e30f, lz = 1e30f, hz = -1e30f, lo = 1e30f;
+                      float& groundOffset, float* height = nullptr) {
+    float lx = 1e30f, hx = -1e30f, lz = 1e30f, hz = -1e30f, lo = 1e30f, hi = -1e30f;
     for (const auto& sm : subs) {
         for (size_t i = 0; i + 2 < sm.pos.size(); i += 3) {
             lx = std::min(lx, sm.pos[i]);     hx = std::max(hx, sm.pos[i]);
             lz = std::min(lz, sm.pos[i + 1]); hz = std::max(hz, sm.pos[i + 1]);
             lo = std::min(lo, sm.pos[i + 2]);
+            hi = std::max(hi, sm.pos[i + 2]);
         }
     }
     const bool any = lx < 1e29f && lz < 1e29f;
     length = any ? std::max(1.0f, hz - lz) : 4.5f;
     radius = any ? std::max(0.5f, 0.5f * (hx - lx)) : 1.1f;
     groundOffset = (lo < 1e29f) ? -lo : 0.0f;
+    if (height) *height = any ? std::max(0.5f, hi - lo) : 1.8f;
 }
 
 // ---------------------------------------------------------------------------
@@ -909,8 +944,10 @@ void App::updateNodeEvents(float dt) {
     st.havePosition = true;
     if(!scriptLoadInitialized_||scriptLoadRevision_!=economy_.loadStateRevision()) {
         const auto* job=economy_.activeJob();
-        // Port adapter: formafia is the currently available cargo-risk signal.
-        // Exact original load/player risk fields remain an open discrepancy.
+          // Temporary port policy, NOT original accountForGuilt: a formafia
+          // tag cannot supply the original related cargo records, hostility
+          // flags or normalised company rating. The typed runtime path needs
+          // those real inputs before it can replace this adapter safely.
         const bool mafiaEligible=job&&job->mafia;
         scriptRuntime_->onLoadStateChanged(mafiaEligible,mafiaEligible);
         scriptLoadRevision_=economy_.loadStateRevision();scriptLoadInitialized_=true;
@@ -943,6 +980,10 @@ void App::updateNodeEvents(float dt) {
 // ambush/police text of Ms.sch and the script messages (GameData::messages).
 void App::pushMessage(const std::string& text, const std::string& kind) {
     if (text.empty()) return;
+    if (msgHold_) {                    // --msg-shot: keep the captured line
+        LOG("message: '%s' (%s) suppressed (--msg-shot capture)", text.c_str(), kind.c_str());
+        return;
+    }
     msgText_ = text;
     msgTimer_ = 6.0f;
     msgAge_ = 0.0f;
@@ -980,8 +1021,8 @@ void App::spawnTraffic() {
     for (const char* model : wanted) {
         if ((int)ids.size() >= opt_.trafficModels) break;
         if (!trafficB3d_.buildVehicleScene(model)) continue;
-        float len = 4.5f, rad = 1.1f, off = 0.0f;
-        modelBody(trafficB3d_.submeshes(), len, rad, off);
+        float len = 4.5f, rad = 1.1f, off = 0.0f, height = 1.8f;
+        modelBody(trafficB3d_.submeshes(), len, rad, off, &height);
         const std::vector<B3D::SubMesh> intact = trafficB3d_.submeshes();
         trafficB3d_.buildVehicleScene(model, 3);
         const std::vector<B3D::SubMesh> wrecked = trafficB3d_.submeshes();
@@ -992,7 +1033,7 @@ void App::spawnTraffic() {
             trafficYOff_.push_back(off);
             trafficIntact_.push_back(idIntact);
             trafficDamaged_.push_back(idDented);
-              traffic_.setBody((int)ids.size() - 1, len, rad);   // capsule for contacts
+              traffic_.setBody((int)ids.size() - 1, len, rad, height);
               bool freight = false;
               for (const auto& def : gameData_.vehicles)
                   if (def.model == model && (def.klass == "lorry" || def.klass == "tractor"))
@@ -1009,6 +1050,7 @@ void App::spawnTraffic() {
     Traffic::Player player;
     player.valid=true;player.x=vehicle3d_.x();player.z=vehicle3d_.z();player.yaw=vehicle3d_.yaw();
     player.radius=playerRadius_;player.length=playerLength_;
+    player.h=vehicle3d_.y()-Vehicle::RIDE_HEIGHT;player.height=vehicle3d_.collisionHeight();
     traffic_.setPlayer(player);
     traffic_.spawn(vehicle3d_.x(), vehicle3d_.z(), opt_.trafficRadius, opt_.traffic);
     const Traffic::Stats& st = traffic_.stats();
@@ -1260,12 +1302,18 @@ void App::optsFineShot() {
 }
 
 // --msg-shot TEXT: one deterministic frame with the pager window up.
+// --msg-shot TEXT: one deterministic frame with the pager window up.  An
+// empty TEXT holds the pager *hidden* - that is the control frame for the
+// "message window is drawn" pixel check, because a world message (an ambush
+// firing on the very first update) would otherwise put the plate into both
+// frames and the comparison would measure only the glyphs.
 void App::optsMsgShot() {
     state_ = State::World;
     const std::string t = cp1251ToUtf8(opt_.msgShot);
-    pushMessage(t, "script (--msg-shot)");
+    if (!t.empty()) pushMessage(t, "script (--msg-shot)");
+    msgHold_ = true;               // the capture frame shows exactly this line
     map_.setForced(true);
-    LOG("message: --msg-shot '%s'", t.c_str());
+    LOG("message: --msg-shot '%s'%s", t.c_str(), t.empty() ? " (pager held hidden)" : "");
 }
 
 void App::drawDashboard() {
@@ -1658,11 +1706,10 @@ void App::updateAmbushes() {
         a.observedFires = state.fires;
         LOG("ambush: '%s' (%s) fired at %.0f %.0f: %d %s cars, %zu submeshes",
             a.klass.c_str(), model.c_str(), a.x, a.z, spawned, model.c_str(), extra.size());
-        msgText_ = (a.klass == "MAFIA") ? "ЗАСАДА: МАФИЯ!" : "ЗАСАДА: ПОЛИЦИЯ!";
-        msgTimer_ = 6.0f;
-        msgAge_ = 0.0f;
-        msgNew_ = true;
-        LOG("message: '%s' (ambush %s)", msgText_.c_str(), a.klass.c_str());
+        // Routed through the pager so a --msg-shot capture can hold its own line
+        // instead of being overwritten by an ambush firing on the first update.
+        pushMessage((a.klass == "MAFIA") ? "ЗАСАДА: МАФИЯ!" : "ЗАСАДА: ПОЛИЦИЯ!",
+                    "ambush " + a.klass);
         // Rebuild to include the newly appended cars, but keep the current
         // script-controlled hidden groups.  Clearing the set made every gated
         // object flash visible for the frame in which an ambush appeared.
@@ -1790,11 +1837,13 @@ void App::loadWorldTiles() {
         std::sort(files.begin(), files.end());
     }
     size_t total = 0;
+    worldProxies_.clear();
     for (const std::string& p : files) {
         B3D t;
         if (!t.load(p)) continue;
         t.buildScene();
         total += t.submeshes().size();
+        for (const auto& hp : t.hitProxies()) worldProxies_.push_back(hp);
         for (auto& sm : t.submeshesMutable()) worldMeshes_.push_back(std::move(sm));
         // texture base: <dir>/ENV/<tile>
         std::string base = p.substr(0, p.size() - 4);
@@ -1891,6 +1940,14 @@ bool App::loadData() {
         spawn_[1] = opt_.spawnOverride[1];
         spawn_[2] = opt_.spawnOverride[2];
     }
+    // The GAME.CNF startposition carries (x, z, height) - no heading.  king.exe's
+    // setPlayerPosition (0x43e610) resolves the start's road PositionId and the
+    // vehicle is aligned with the road there, so derive the heading from the
+    // nearest authored RSEG.  An explicit `--spawn x,z,yaw` still wins.
+    if (!opt_.spawnYawGiven) {
+        spawn_[2] = roadHeadingAt(spawn_[0], spawn_[1]);
+        LOG("app: start heading %.0f deg (nearest authored road segment)", spawn_[2]);
+    }
 
     SceneTextures::loadPalette(opt_.dataDir + "/COMMON/common1.res");
     haveMenuScene_ = menuScene_.load(opt_.dataDir + "/MENV/dr.b3d");
@@ -1899,7 +1956,12 @@ bool App::loadData() {
     spawnParkedVehicles();
     if (opt_.noCollision) LOG("collision: disabled by --no-collision");
     else {
-        collision_.build(worldMeshes_);
+        // The authored hit_* proxies are the engine's own collision data; the
+        // visible-mesh rule only fills in what they do not cover (docs/hit_proxies.md).
+        if (opt_.proxyCollision && !worldProxies_.empty())
+            collision_.build(worldMeshes_, worldProxies_);   // --proxy-collision
+        else
+            collision_.build(worldMeshes_);                  // default: visible meshes
         vehicle3d_.setCollision(&collision_);
     }
     if (!opt_.onlyName.empty()) {
@@ -3188,6 +3250,8 @@ void App::drawWorld(float dt, bool interactive) {
             p.vz *= vehicle3d_.speed();
             p.radius = playerRadius_;
             p.length = playerLength_;
+            p.h = vehicle3d_.y() - Vehicle::RIDE_HEIGHT;
+            p.height = vehicle3d_.collisionHeight();
             traffic_.setPlayer(p);
         }
         traffic_.update(dt, vehicle3d_.x(), vehicle3d_.z(), opt_.trafficRadius);
@@ -3423,6 +3487,8 @@ int App::trafficReport() {
         p.vz *= vehicle3d_.speed();
         p.radius = playerRadius_;
         p.length = playerLength_;
+        p.h = vehicle3d_.y() - Vehicle::RIDE_HEIGHT;
+        p.height = vehicle3d_.collisionHeight();
         traffic_.setPlayer(p);
         traffic_.update(step, vehicle3d_.x(), vehicle3d_.z(), opt_.trafficRadius);
         const Traffic::PlayerHit& h = traffic_.playerHit();
@@ -4092,6 +4158,8 @@ int App::trafficWheelProbe() {
             p.valid = true;
             p.x = vehicle3d_.x(); p.z = vehicle3d_.z(); p.yaw = vehicle3d_.yaw();
             p.radius = playerRadius_; p.length = playerLength_;
+            p.h = vehicle3d_.y() - Vehicle::RIDE_HEIGHT;
+            p.height = vehicle3d_.collisionHeight();
             traffic_.setPlayer(p);
             traffic_.update(step, vehicle3d_.x(), vehicle3d_.z(), opt_.trafficRadius);
             if ((i % 3) != 0) continue;                 // 20 Hz is plenty for a height
@@ -4199,6 +4267,8 @@ int App::driveTest() {
             p.vz *= vehicle3d_.speed();
             p.radius = playerRadius_;
             p.length = playerLength_;
+            p.h = vehicle3d_.y() - Vehicle::RIDE_HEIGHT;
+            p.height = vehicle3d_.collisionHeight();
             traffic_.setPlayer(p);
         }
         traffic_.update(step, vehicle3d_.x(), vehicle3d_.z(), opt_.trafficRadius);

@@ -563,8 +563,10 @@ check("the script message is pushed to the pager",
       "message: '" in out and "--msg-shot" in out,
       [l for l in out.splitlines() if "message:" in l][-1:][0][-60:] if "message:" in out else "no line")
 w, h, rows = read_bmp(os.path.join(OUT, "msg.bmp"))
-run("--scene", "world", "--no-map", "--screenshot", "--out", os.path.join(OUT, "msg_off.bmp"),
-    "--spawn", "-2327,-3767,-29")
+# The control frame holds the pager hidden (--msg-shot ""), so a world message
+# cannot put the plate into both frames and leave only the glyphs to compare.
+run("--scene", "world", "--no-map", "--msg-shot", "", "--screenshot",
+    "--out", os.path.join(OUT, "msg_off.bmp"), "--spawn", "-2327,-3767,-29")
 _, _, rows_off = read_bmp(os.path.join(OUT, "msg_off.bmp"))
 # The strip band itself is bright chrome, so the window is measured as the
 # DIFFERENCE against the same frame without a message (the positive text check
@@ -589,9 +591,12 @@ check("the strip path converts the script message to the right glyph codes",
       bool(mg) and mg.group(1).strip() == want,
       (mg.group(1).strip() if mg else "no line"))
 # the same frame with no message must not differ from itself: the window is the
-# only thing the message adds, so a second identical run has no differences
-run("--scene", "world", "--no-map", "--screenshot", "--out", os.path.join(OUT, "msg_off2.bmp"),
-    "--spawn", "-2327,-3767,-29")
+# only thing the message adds, so a second identical run has no differences.
+# Both controls hold the pager hidden (--msg-shot ""), otherwise a world message
+# (an ambush firing on the first update at this spawn) would put the plate into
+# the "empty" frames as well.
+run("--scene", "world", "--no-map", "--msg-shot", "", "--screenshot",
+    "--out", os.path.join(OUT, "msg_off2.bmp"), "--spawn", "-2327,-3767,-29")
 _, _, rows2 = read_bmp(os.path.join(OUT, "msg_off2.bmp"))
 same = count(rows2, 240, 560, 8, 48, lambda c: True)
 diff_none = 0

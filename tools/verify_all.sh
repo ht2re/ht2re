@@ -29,6 +29,11 @@ fi
 run build cmake --build build -j 6
 if (( failures )); then summary; exit 1; fi
 run scripts tools/build_script_check.sh original
+# The ambush/load-state contract against the local original executable (radare2).
+# Static disassembly only; skipped when r2 or original/king.exe is unavailable.
+if command -v r2 >/dev/null 2>&1 && [[ -f original/king.exe ]]; then
+    run ambush-contract "$PYTHON" tools/ambush_original_probe.py original/king.exe
+fi
 run economy tools/build_economy_check.sh
 run input tools/build_input_test.sh original
 run audio tools/build_audio_check.sh
