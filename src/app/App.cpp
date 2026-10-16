@@ -1111,21 +1111,35 @@ Mat4 App::trafficRoadPose(const Traffic::Car& c) const {
     const float rx = fz, rz = -fx;
     const float local[4][2] = {{0,halfBase},{0,-halfBase},{-halfTrack,0},{halfTrack,0}};
     float h[4];
-    bool complete = true;
+    bool ok[4] = {false, false, false, false};
+    int found = 0;
     for (int i=0;i<4;++i) {
         float distance; bool visible;
-        complete &= ground_.roadSurface().heightAt(c.x+rx*local[i][0]+fx*local[i][1],
+        ok[i] = ground_.roadSurface().heightAt(c.x+rx*local[i][0]+fx*local[i][1],
             c.z+rz*local[i][0]+fz*local[i][1], c.h, 12.0f, h[i], distance, visible);
+        if (ok[i]) ++found;
     }
-    if (!complete) {
+    if (found == 0) {
+        // No authored asphalt in any of the four columns (junctions, depots, the
+        // gaps between the authored patches).  Fall back to the *same layered
+        // drivable surface* the player's own ride uses instead of the `.way` graph
+        // height: the graph can sit metres above the ground that is actually
+        // drawn there, which is what made cars look like they were in the air.
         float y = c.h;
-        if (y == 0 && !ground_.surfaceOnRoad(c.x,c.z,y) && !ground_.empty())
-            y = ground_.heightAt(c.x,c.z,0);
+        int src = -1;
+        const float d = ground_.drivableY(c.x, c.z, c.h, &src, nullptr);
+        if (src >= 0 && std::isfinite(d)) y = d;
+        else if (ground_.surfaceOnRoad(c.x, c.z, y)) { /* the `.way` profile answered */ }
+        else if (!ground_.empty() && y == 0.0f) y = ground_.heightAt(c.x, c.z, 0.0f);
         return Mat4::translation(c.x,y,c.z)*Mat4::rotY(c.yaw);
     }
-    const float y = (h[0]+h[1]+h[2]+h[3])*.25f;
-    const float pitch = std::atan2(h[0]-h[1],2*halfBase);
-    const float roll = std::atan2(h[3]-h[2],2*halfTrack);
+    // Use whatever the four probes did find: a partly off-road car then still sits
+    // on the surface under the wheels instead of on the graph height.
+    float sum = 0.0f;
+    for (int i=0;i<4;++i) if (ok[i]) sum += h[i];
+    const float y = sum / (float)found;
+    const float pitch = (ok[0] && ok[1]) ? std::atan2(h[0]-h[1],2*halfBase) : 0.0f;
+    const float roll  = (ok[2] && ok[3]) ? std::atan2(h[3]-h[2],2*halfTrack) : 0.0f;
     return Mat4::translation(c.x,y,c.z)*Mat4::rotY(c.yaw)*Mat4::rotX(-pitch)*Mat4::rotZ(roll);
 }
 
@@ -4138,6 +4152,7 @@ int App::trafficWheelProbe() {
     const float step = 1.0f / 60.0f;
     const int steps = std::max(1, (int)(opt_.trafficWheelProbe / step));
     ProbeHist all;
+    ProbeHist drift;      // no asphalt under the wheel: how far is it above the terrain?
     size_t cars = 0, noAsphalt = 0, junctionSamples = 0, over5 = 0, over20 = 0;
     size_t srcCount[4] = {};
     float worstE = 0, worstX = 0, worstZ = 0;
@@ -4177,7 +4192,21 @@ int App::trafficWheelProbe() {
                     float wheelY = pose.m[13] + pose.m[1]*off[w][0] + pose.m[9]*off[w][1];
                     bool isRoad = false;
                     float sy = 0;
-                    if (!grid.nearest(wx, wz, c.h, 40.0f, true, sy, isRoad)) { ++noAsphalt; ++hNo; continue; }
+                    if (!grid.nearest(wx, wz, c.h, 40.0f, true, sy, isRoad)) {
+                        ++noAsphalt; ++hNo;
+                        // No asphalt in the column: the visible surface is the terrain, so
+                        // this is what "the car looks like it is in the air" measures.
+                        // The reference is the surface the *player* rides on in the same
+                        // spot (GroundMap::drivableY): the terrain field alone sits
+                        // metres under the drawn road, so comparing with it would
+                        // report the layer gap, not the placement error.
+                        int dsrc = -1;
+                        const float dy = ground_.drivableY(wx, wz, c.h, &dsrc, nullptr);
+                        drift.add(wheelY - (dsrc >= 0 && std::isfinite(dy) ? dy
+                                                                         : ground_.heightAt(wx, wz, c.h)),
+                                  wx, wz);
+                        continue;
+                    }
                     float e = wheelY - sy;
                     {
                         int src = 0;
@@ -4216,6 +4245,10 @@ int App::trafficWheelProbe() {
         worstX - worstWheelX, worstZ - worstWheelZ, worstGraph, worstSurf);
     LOG("traffic-wheel-probe: surface layers under the wheels: terrain %zu, .way %zu, "
         "tile asphalt %zu, authored ground %zu", srcCount[0], srcCount[1], srcCount[2], srcCount[3]);
+    LOG("traffic-wheel-probe: where no asphalt was found, the drawn wheel sits %+.3f m "
+        "(median %+.3f, p95 %+.3f, max %.3f) above the visible terrain at (%.0f, %.0f)",
+        drift.mean(), drift.quantile(0.5f), drift.quantile(0.95f), drift.maxV,
+        drift.maxX, drift.maxZ);
     LOG("traffic-wheel-probe: RESULT samples=%zu noasphalt=%zu mean=%.3f median=%.3f p95=%.3f "
         "max=%.3f over5=%zu over20=%zu junction=%zu worstx=%.0f worstz=%.0f",
         cars, noAsphalt, all.mean(), all.quantile(0.5f), all.quantile(0.95f), all.maxV,
