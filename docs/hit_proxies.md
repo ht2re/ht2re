@@ -160,12 +160,39 @@ Two more facts close the model:
   artifacts) and stay on the open list.
 
 Consequence for the port: the grid cannot represent a zero-thickness wall without
-inflating it, so the faithful step is a **plane wall list** (normal + offset, bounded
-by the object's `CollisionCenter`/`CollisionRadius` and the subtag-12 bottom) with a
-plane-crossing test in the vehicle sweep - `perform_wall_collision` above.  The
-subtag-20 polygons are *not* that: 1545 proxies carry none, the ones that do carry
-2-11 records each, and the GAME.CNF start lies inside one, so they describe a
+inflating it, so the faithful step is a **plane wall list** (normal + offset + its
+extent) with a plane-crossing test in the vehicle sweep - `perform_wall_collision`
+above.  The subtag-20 polygons are *not* that: 1545 proxies carry none, the ones that
+do carry 2-11 records each, and the GAME.CNF start lies inside one, so they describe a
 *drivable/occupied area* (consistent with `get_road_collision()`), not an obstacle.
+
+### The wall is bounded: subtag 23 is its extent (2026-10-16)
+
+A subtag-9 record carries **two children of subtag 23**, and those are the wall's own
+corner points.  `hit_obj_ab_012` (visible bbox `x[630..670] z[-2420..-2380]
+y[240..248.8]`) gives the plane `(0.7071, 0.7071, 0)` with `d = 1237.437` plus the
+points `(660, -2402.5, 247.5)`, `(654.9, -2404.9, 247.0)`, `(660, -2400, 247.5)`,
+`(650, -2400, 247.5)` - all on or next to that object, i.e. the wall segment's corners.
+
+Payload layout (payload = record offset + 40):
+
+| subtag | header | points |
+|---|---|---|
+| 20 | 8 dwords, `count` at +16 | `count` x 3 floats from **+32** |
+| 23 | 5 dwords (`0,0,0, 30, count`), `count` at +16 | `count` x 3 floats from **+20**, then a second block |
+
+So the authored collision of one object is:
+
+```
+wall        subtag 9  = normal (x, z, y) + d, with its extent in its subtag-23 children
+bottom      subtag 12, params[7] = -y_min
+area / road subtag 20 = a polygon (not an obstacle - see above)
+link        subtag 18 = anchor + container (STOS_walls, benzo_hit, store_*_hit, ...)
+```
+
+That is the complete specification a faithful collision needs: a **bounded,
+zero-thickness wall** (normal + extent + bottom) resolved by crossing it
+(`perform_wall_collision`) instead of a rasterised cell.
 
 
 Collision is **planes + a bounded volume + wall/sweep resolution**, not a bit grid.

@@ -387,7 +387,22 @@ int main(int argc, char** argv) {
                     printf("      raw payload (subtag 40):\n");
                     dumpDwords(raw.data(), k.off + 40, std::min(k.end, raw.size()), "        ");
                 }
-                for (const auto& kk : k.kids) scan(kk);
+                for (const auto& kk : k.kids) {
+                    printf("      child-of-child %-20s subtag=%-2u params=%zu mesh=%d\n",
+                           kk.name.empty() ? "(unnamed)" : kk.name.c_str(), kk.subtag,
+                           kk.params.size(), kk.meshIndex);
+                    for (size_t i = 0; i < kk.params.size(); ++i) {
+                        float fl; memcpy(&fl, &kk.params[i], 4);
+                        printf("          p%-2zu 0x%08x %14.4f\n", i, kk.params[i], fl);
+                    }
+                    if (kk.subtag == 20 || kk.subtag == 23)
+                        dumpDwords(raw.data(), kk.off + 40, std::min(kk.end, raw.size()), "        ");
+                    for (const auto& k3 : kk.kids)
+                        printf("          deeper %-16s subtag=%u kids=%zu\n",
+                               k3.name.empty() ? "(unnamed)" : k3.name.c_str(), k3.subtag,
+                               k3.kids.size());
+                    scan(kk);
+                }
             }
         };
         for (const auto& n : t.tree()) scan(n);
