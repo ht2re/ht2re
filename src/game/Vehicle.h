@@ -91,6 +91,7 @@ public:
     // Drivable height at (x, z): the road surface when the point is on a road.
     float surfaceY(float x, float z, float fallback) const;
     void setCollisionHeight(float h) { collisionHeight_ = std::max(0.5f,h); }
+    float collisionHeight() const { return collisionHeight_; }
     // Solid world geometry (src/game/Collision.cpp); when set, the body slides
     // along walls instead of passing through them.
     void setCollision(const Collision* c) { collision = c; }

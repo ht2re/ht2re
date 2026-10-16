@@ -78,6 +78,11 @@ inline float dist2(const float ax, const float az, const float bx, const float b
     const float dx = ax - bx, dz = az - bz;
     return dx * dx + dz * dz;
 }
+// Contacts and anticipation need overlapping vertical slabs, not just an XZ
+// crossing. Heights are selected-model bounds; the road graph supplies the base.
+inline bool sameLevel(float ah, float aHeight, float bh, float bHeight) {
+    return ah < bh + bHeight && bh < ah + aHeight;
+}
 // Signed shortest difference of two angles in degrees (-180, 180].
 inline float shortAngle(float d) {
     while (d > 180.0f) d -= 360.0f;
@@ -334,13 +339,18 @@ void Traffic::setModels(const std::vector<int>& ids) { models_ = ids; }
 // ---------------------------------------------------------------------------
 // car bodies
 // ---------------------------------------------------------------------------
-void Traffic::setBody(int model, float length, float radius) {
+void Traffic::setBody(int model, float length, float radius, float height) {
     if (model < 0) return;
     if ((int)bodies_.size() <= model) bodies_.resize((size_t)model + 1);
     Body b;
     b.radius = radius > 0.2f ? radius : kBodyRadius;
     b.length = length > 1.0f ? length : kCarLength;
     bodies_[(size_t)model] = b;
+    if ((int)bodyHeights_.size() <= model) bodyHeights_.resize((size_t)model + 1, 1.8f);
+    bodyHeights_[(size_t)model] = std::isfinite(height) && height >= 0.5f ? height : 1.8f;
+}
+float Traffic::heightOf(int model) const {
+    return model >= 0 && model < (int)bodyHeights_.size() ? bodyHeights_[(size_t)model] : 1.8f;
 }
 Traffic::Body Traffic::bodyOf(int model) const {
     if (model >= 0 && model < (int)bodies_.size()) return bodies_[(size_t)model];
@@ -669,6 +679,8 @@ bool Traffic::vertexBusy(int v, const Car* self, float zone) const {
     for (const Car& o : cars_) {
         if (&o == self) continue;
         const float reach = zone + 0.5f * bodyOf(o.model).length;
+        if (!sameLevel(o.h, heightOf(o.model), verts_[v].h,
+                       self ? heightOf(self->model) : 1.8f)) continue;
         if (dist2(o.x, o.z, verts_[v].x, verts_[v].z) < reach * reach) return true;
     }
     return false;
@@ -763,9 +775,23 @@ void Traffic::spawn(float px, float pz, float radius, int count) {
             const float s = (0.1f + 0.8f * nextFloat()) * edges_[ei].len;
             if (occupied(ei, dir, s, kSpawnGap)) continue;   // keep spawn gaps honest
             placeOn(c, ei, dir, s);
-            if (player_.valid && dist2(c.x,c.z,player_.x,player_.z)<kRelocateMin*kRelocateMin) continue;
+            // The initial population is the traffic that streams *around* the
+            // player, so cars close to it are expected and visible on purpose.
+            // Only a real body overlap must be rejected here; the 90 m
+            // streaming rule (kRelocateMin) governs relocate(), not spawn().
+            if (player_.valid &&
+                sameLevel(c.h, heightOf(c.model), player_.h, player_.height)) {
+                Body pb;
+                pb.radius = player_.radius;
+                pb.length = player_.length;
+                float nx = 0, nz = 0;
+                if (Collision::bodyOverlap(c.x, c.z, c.yaw, bodyOf(c.model),
+                                           player_.x, player_.z, player_.yaw, pb,
+                                           nx, nz) > 0.0f) continue;
+            }
             bool overlaps = false;
             for (const Car& other : cars_) {
+                if (!sameLevel(c.h, heightOf(c.model), other.h, heightOf(other.model))) continue;
                 float nx = 0, nz = 0;
                 if (Collision::bodyOverlap(c.x, c.z, c.yaw, bodyOf(c.model),
                                            other.x, other.z, other.yaw, bodyOf(other.model),
@@ -988,6 +1014,20 @@ float Traffic::playerLeaderCap(const Car& c, float& fx, float& fz) const {
     const float dx = player_.x - c.x, dz = player_.z - c.z;
     const float along = dx * fx + dz * fz;
     if (along <= 0.0f || along > kPlayerLook) return 1e9f;
+    // Compare levels where the leader is, not at the follower: on a ramp the
+    // two contact planes can differ by several metres while sharing a lane.
+    float roadH = c.h;
+    float remaining = along;
+    int edge = c.edge, dir = c.dir;
+    float s = c.s;
+    for (int step=0; edge>=0 && edge<(int)edges_.size() && step<2; ++step) {
+        const float available = edges_[edge].len-s;
+        float x,z,tx,tz;
+        sample(edge,dir,s+remaining,x,roadH,z,tx,tz);
+        if (remaining<=available) break;
+        remaining-=available; edge=c.nextEdge; dir=c.nextDir; s=0;
+    }
+    if (!sameLevel(roadH, heightOf(c.model), player_.h, player_.height)) return 1e9f;
     const float rx = fz, rz = -fx;
     const float lat = dx * rx + dz * rz;
     const Body cb = bodyOf(c.model);
@@ -1030,6 +1070,7 @@ void Traffic::resolveContacts() {
             const int ib = sweep_[sj];
             Car& B = cars_[(size_t)ib];
             if (B.x - A.x > kPairReach) break;             // sorted: nothing closer
+            if (!sameLevel(A.h, heightOf(A.model), B.h, heightOf(B.model))) continue;
             const Body bb = bodyOf(B.model);
             const float reach = 0.5f * (ba.length + bb.length) + 1.0f;
             if (dist2(A.x, A.z, B.x, B.z) > reach * reach) continue;
@@ -1123,6 +1164,7 @@ void Traffic::resolveContacts() {
     pb.length = player_.length;
     for (size_t i = 0; i < n; ++i) {
         Car& A = cars_[i];
+        if (!sameLevel(A.h, heightOf(A.model), player_.h, player_.height)) continue;
         const Body ba = bodyOf(A.model);
         float nx = 0.0f, nz = 0.0f;
         const float overlap = Collision::bodyOverlap(A.x, A.z, A.yaw, ba,
@@ -1315,6 +1357,9 @@ void Traffic::update(float dt, float px, float pz, float radius) {
     // --- contacts (car-vs-car, car-vs-player) -------------------------------
     // Before the lane-group clamp: the clamp then has the last word, so a
     // cross-edge shove can never leave two cars of the same lane overlapping.
+    // Integration has changed s/edge/dir. Test this tick's pose, not the stale
+    // coordinates from the previous frame (especially at crossings/ramps).
+    for (Car& c : cars_) refreshPose(c);
     resolveContacts();
 
     // --- hard no-overlap pass (front to back within each edge/dir) ----------

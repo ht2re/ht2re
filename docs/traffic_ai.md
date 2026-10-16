@@ -7,6 +7,17 @@ player, and resolve contacts as capsules that deal damage to both sides.
 
 Everything below is reproducible offline:
 
+Update 2026-10-15: contacts, player anticipation, initial pair-overlap checks
+and junction occupancy now reject disjoint vertical slabs. App supplies the
+selected intact model's bbox height and the player's road-contact height.
+Player anticipation compares height at the projected leader position along
+the road, so elevation changes on a ramp do not disable braking. Contacts
+refresh all car poses after integration, before testing capsule overlaps.
+This is still a port approximation: AI base height comes from the navigation
+graph, rather than the rendered four-point road pose; contacts are discrete,
+not continuous swept collisions. Deep collinear overlaps at large timesteps
+can still get a lateral capsule normal and no impact damage.
+
 ```bash
 # build the game
 cmake -B build && cmake --build build -j
@@ -489,9 +500,10 @@ void update(float dt, float px, float pz, float radius);
 const std::vector<Car>& cars() const;
 
 // bodies / contacts / player
-void setBody(int model, float length, float radius);
+void setBody(int model, float length, float radius, float height = 1.8f);
 Body bodyOf(int model) const;
-struct Player { bool valid; float x, z, yaw, vx, vz, radius, length; };
+float heightOf(int model) const;
+struct Player { bool valid; float x, z, yaw, vx, vz, radius, length, h, height; };
 void setPlayer(const Player&);   const Player& player() const;
 struct PlayerHit { float pushX, pushZ, damage, impact; int contacts; bool hit; };
 const PlayerHit& playerHit() const;

@@ -232,6 +232,32 @@ int main(int argc, char** argv) {
     std::printf("COCKPIT brand=%s needles=%d anchor_t=%.3f,%.3f,%.3f\n",
                 ck.brand().c_str(), ck.needleCount(), mx, my, mz);
 
+    // A real selected vehicle submitted through the dynamic pass must appear
+    // inside the reflected glass, not on top of the cockpit/frame. The old
+    // static-world checks could not detect App forgetting extraWorldPass.
+    int dynamicCalls = 0, dynamicDraws = 0;
+    B3D reflectedCar;
+    const bool carLoaded = reflectedCar.load(a.data + "/COMMON/TRUCKS.B3D") &&
+                          reflectedCar.buildVehicleScene("BmwM5");
+    const int carBatch = carLoaded ? r.addTrafficModel(reflectedCar.submeshes(), &vehicleTex) : -1;
+    mirror.extraWorldPass = [&](float x,float y,float z,float yaw,float pitch) {
+        ++dynamicCalls;
+        const float angle = yaw * 3.14159265f / 180;
+        r.beginTraffic(x,y,z,yaw,pitch);
+        r.drawTrafficInstance(carBatch, Mat4::translation(x+std::sin(angle)*12,
+            y-1.8f,z-std::cos(angle)*12)*Mat4::rotY(yaw));
+        dynamicDraws += (int)r.trafficInstancesDrawn();
+    };
+    drawCockpitFrame(r, &mirror, ck, v, true, haveTrucks);
+    if (finish) finish();
+    r.screenshot(a.out + "_mirror_traffic.bmp");
+    mirror.setVisible(false);
+    drawCockpitFrame(r, &mirror, ck, v, true, haveTrucks);
+    std::printf("MIRROR_TRAFFIC loaded=%d calls=%d draws=%d\n",
+                carLoaded?1:0,dynamicCalls,dynamicDraws);
+    mirror.extraWorldPass = {};
+    mirror.setVisible(true);
+
     // cost: the same frame with the mirror hidden (the app's other view modes
     // call draw() with setVisible(false): it must cost one branch) and drawn
     const int frames = a.frames > 0 ? a.frames : 60;

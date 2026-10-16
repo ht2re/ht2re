@@ -189,9 +189,9 @@ Because the target is exactly the glass rect, the reflection is clipped to the
 mirror rectangle by construction; `glScissor` is not needed and the harness
 checks that not a single pixel outside the frame rect changes.
 
-What is *not* in the reflection: the AI traffic (owned by `App::drawTraffic()`,
-reachable through the `extraWorldPass` hook if the wiring wants it) and the
-player's own truck (the mount is behind it, so it is never in view anyway).
+As of 2026-10-15, App connects `extraWorldPass` to `drawTraffic`, including
+the same intact/damaged model selection and road pose as the main view.
+The player's own truck is not submitted to this reflection pass.
 No art → one `LOG` line and `loaded() == false`; no render-target support → one
 line and the mirror stays off.
 
@@ -435,10 +435,12 @@ one.
   wiring is delivered as the verified diff above /
   `tools/mirror_wiring.diff`; `CMakeLists.txt` gained the one
   `src/gfx/Mirror.cpp` line.
-* **The reflection does not include the AI traffic.**  `Renderer` owns terrain,
-  roads and the world tiles, but the traffic instances live in `App`, so
-  `Mirror::draw()` cannot replay them.  `Mirror::extraWorldPass` is the hook
-  for the traffic pass if the wiring wants it (one extra lambda).
+* **Historical traffic omission, fixed 2026-10-15:** App now connects
+  `Mirror::extraWorldPass`. The harness additionally submits a selected BmwM5
+  through that pass, verifies changed glass pixels, no pixels outside the
+  glass, and no callback when hidden. Streaming visibility is still based on
+  the player's forward cone, not the mirror camera: reflected popping remains
+  an open limitation, separate from the missing draw pass.
 * **The exact original screen rects remain undetermined.**  `(10,10,460,150)`
   and `(14,19,126,379)` are the two quads the mirror draw path copies and
   `(1117,50)` is its destination, but which of them belongs to left/right/top is

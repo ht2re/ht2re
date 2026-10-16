@@ -91,6 +91,17 @@ def main():
     yes = read_bmp(os.path.join(OUT, "mirror_mirror.bmp"))
     noflip = read_bmp(os.path.join(OUT, "mirror_mirror_noflip.bmp"))
     moved = read_bmp(os.path.join(OUT, "mirror_mirror_moved.bmp"))
+    traffic = read_bmp(os.path.join(OUT, "mirror_mirror_traffic.bmp"))
+    dynamic = re.search(r"MIRROR_TRAFFIC loaded=(\d+) calls=(\d+) draws=(\d+)", log)
+    check("dynamic reflection pass draws a selected vehicle and is skipped when hidden",
+          bool(dynamic) and tuple(map(int, dynamic.groups())) == (1, 1, 1),
+          dynamic.group(0) if dynamic else "missing dynamic pass")
+    _, changed, _ = region_diff(yes, traffic, gx, gy, gx + gw, gy + gh)
+    check("dynamic vehicle changes reflection pixels", changed > 10, f"{changed} px")
+    outside = sum(yes[2][y][x] != traffic[2][y][x]
+                  for y in range(yes[1]) for x in range(yes[0])
+                  if not (gx <= x < gx + gw and gy <= y < gy + gh))
+    check("dynamic reflection does not leak over cockpit or mirror frame", outside == 0, f"{outside} px")
 
     # 1. the glass shows something else than the cockpit view behind it
     d, n, tot = region_diff(no, yes, gx, gy, gx + gw, gy + gh)

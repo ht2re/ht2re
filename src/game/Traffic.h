@@ -168,8 +168,9 @@ public:
     // capsule geometry itself lives in src/game/Collision.h.  The defaults are
     // used for a model that was never described.
     using Body = Collision::Body;
-    void setBody(int model, float length, float radius);
+    void setBody(int model, float length, float radius, float height = 1.8f);
     Body bodyOf(int model) const;
+    float heightOf(int model) const;
     // The player's vehicle, refreshed by the caller before update().  While it is
     // not `valid` no car interacts with the player (headless harnesses).
     struct Player {
@@ -178,6 +179,7 @@ public:
         float yaw = 0;                      // degrees (Vehicle convention)
         float vx = 0, vz = 0;               // velocity (m/s)
         float radius = 1.45f, length = 9.5f;
+        float h = 0, height = 4.0f;         // road contact plane and bbox height
     };
     void setPlayer(const Player& p) { player_ = p; }
     const Player& player() const { return player_; }
@@ -295,6 +297,7 @@ private:
     std::vector<Car> cars_;
     std::vector<int> models_;
     std::vector<Body> bodies_;                   // per model id (grows on demand)
+    std::vector<float> bodyHeights_;
     Player player_;
     PlayerHit playerHit_;
     std::vector<Contact> contacts_;

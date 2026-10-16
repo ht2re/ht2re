@@ -152,6 +152,9 @@ int main(int argc, char** argv) {
         p.x = px; p.z = pz; p.yaw = pyaw;
         p.vx = drive ? 8.0f : 0.0f; p.vz = 0.0f;
         p.radius = 1.62f; p.length = 12.04f;   // the ZilR truck App parks there
+        float lx=0,lz=0,yaw=0;int edge=-1;
+        tr.nearestLane(px,pz,lx,lz,p.h,yaw,edge);
+        p.height = 4.0f; // diagnostic truck; App supplies the actual model bbox
         tr.setPlayer(p);
 #endif
         tr.update(dt, px, pz, radius);
