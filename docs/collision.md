@@ -266,6 +266,13 @@ SubMeshes on link-heavy tiles (aa, ad, aj, al, am).
   `mat_ograjdenie_bridge`, `mat_br_*`) 5 %.  With the ~1 m conservative cell inflation
   plus the body radius a truck can catch those, which is the remaining "invisible wall"
   report.  The authored `hit_obj_*` proxies are the faithful fix.
+  **How much of it is authored after all (2026-10-16):** the same tool now also loads
+  the `hit_*` proxies' wall planes and asks whether an authored plane passes within
+  2 m of each on-asphalt hit - **116 of 205 (56.6 %) do** (1506 planes world-wide).
+  Those walls are the authors' own; the original blocks there too, with a
+  zero-thickness plane instead of the port's inflated cell.  The remaining 43 % are
+  real obstacles without a plane (debris, parked/hidden cars) or port artifacts.
+  See [hit_proxies.md](hit_proxies.md) §10.
 * **Wall inflation.**  Conservative cell marking makes every wall ~1 m thicker than it is
   (plus the body radius in the query), so a truck needs `1 m + r` clearance to pass.
 * **`hit_*` proxies are not used.**  `B3D::buildScene` skips the game's own collision-only

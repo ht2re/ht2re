@@ -137,7 +137,36 @@ which the shipped game cannot have.  491 footprints painted 3.59 M cells and 6 7
 submeshes were skipped as "covered" - the footprints are far coarser than the
 rendered geometry.  The flag therefore stays **off by default**.
 
-### What the faithful port needs
+### The planes are thin walls, not volumes (measured 2026-10-16)
+
+Two more facts close the model:
+
+* **Planes per proxy:** 1129 proxies carry exactly **one** plane, 130 carry two, only
+  32 carry three or more (7, 8 max).  A single plane cannot bound a volume, so the
+  subtag-9 record is a *surface* - a wall the car must not cross - not a face of a
+  convex body.
+* **`perform_wall_collision` (0x57e430)** does exactly that: it works on the plane
+  **normal** `[ebx], [ebx+4], [ebx+8]`, builds a tangent basis from the largest
+  component (`fabs` + the two `fmul`s at 0x57e437..0x57e44d), and intersects it with
+  the **car's motion vector** `[ebp+0xce4], [ebp+0xce8], [ebp+0xcec]` - a
+  plane-crossing test, i.e. an infinitely thin wall.
+* **Agreement with the port's blocking geometry** (`road_block_audit`, which now also
+  loads the proxies): of the 205 `.way` samples that are on authored asphalt *and*
+  inside blocking geometry, **116 (56.6 %) lie within 2 m of an authored wall plane**
+  (1506 planes in total).  So more than half of what looked like "invisible walls on
+  the road" are **authored** walls - the original blocks there too, with a
+  zero-thickness plane instead of the port's ~1 m inflated cell.  The remaining 89
+  samples are not explained by a plane (real obstacles without one, or port
+  artifacts) and stay on the open list.
+
+Consequence for the port: the grid cannot represent a zero-thickness wall without
+inflating it, so the faithful step is a **plane wall list** (normal + offset, bounded
+by the object's `CollisionCenter`/`CollisionRadius` and the subtag-12 bottom) with a
+plane-crossing test in the vehicle sweep - `perform_wall_collision` above.  The
+subtag-20 polygons are *not* that: 1545 proxies carry none, the ones that do carry
+2-11 records each, and the GAME.CNF start lies inside one, so they describe a
+*drivable/occupied area* (consistent with `get_road_collision()`), not an obstacle.
+
 
 Collision is **planes + a bounded volume + wall/sweep resolution**, not a bit grid.
 Porting it means: read the subtag-9 planes of each `hit_*` container, bound them by

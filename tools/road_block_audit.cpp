@@ -109,12 +109,16 @@ int main(int argc, char** argv) {
         return id;
     };
     std::vector<Tri> tris;
+    std::vector<std::array<float,3>> wallPlanes;   // authored wall surfaces (nx, nz, d)
     std::vector<Tri> roadTris;      // drivable asphalt, to split "on the road" from "in a yard"
     size_t subs = 0, ground = 0, flat = 0, surface = 0;
     for (const std::string& p : b3d) {
         B3D t;
         if (!t.load(p)) continue;
         t.buildScene();
+        for (const auto& hp : t.hitProxies())
+            for (size_t i = 0; i + 3 < hp.planes.size(); i += 4)
+                wallPlanes.push_back({hp.planes[i], hp.planes[i + 1], hp.planes[i + 3]});
         for (const auto& sm : t.submeshes()) {
             ++subs;
             const bool groundMat = isGroundMaterial(sm.material);
@@ -184,7 +188,7 @@ int main(int argc, char** argv) {
     }
 
 
-    size_t samples = 0, blocked = 0, blockedOnRoad = 0;
+    size_t samples = 0, blocked = 0, blockedOnRoad = 0, onRoadAuthored = 0;
     std::unordered_map<int, size_t> byMat;
     std::unordered_map<int, size_t> onRoadByMat;
     std::unordered_map<int, std::pair<double, double>> example;
@@ -235,6 +239,14 @@ int main(int argc, char** argv) {
                     }
                 if (onRoad) {
                     ++blockedOnRoad;
+                    float best = 1e30f;
+                    for (const auto& w : wallPlanes) {
+                        const float len = std::sqrt(w[0] * w[0] + w[1] * w[1]);
+                        if (len < 1e-6f) continue;
+                        const float d = std::fabs(w[0] * x + w[1] * z + w[2]) / len;
+                        if (d < best) best = d;
+                    }
+                    if (best < 2.0f) ++onRoadAuthored;
                     ++onRoadByMat[mat];
                     if (!exampleOnRoad.count(mat)) exampleOnRoad[mat] = {x, z};
                 }
@@ -244,6 +256,11 @@ int main(int argc, char** argv) {
     printf("way samples=%zu blocked=%zu (%.2f%%), of them ON authored asphalt=%zu (%.2f%%)\n",
            samples, blocked, samples ? 100.0 * (double)blocked / (double)samples : 0.0,
            blockedOnRoad, samples ? 100.0 * (double)blockedOnRoad / (double)samples : 0.0);
+    printf("   of the on-asphalt hits, %zu (%.1f%%) lie within 2 m of an authored wall plane "
+           "(%zu planes total) -> authored, not phantom\n",
+           onRoadAuthored,
+           blockedOnRoad ? 100.0 * (double)onRoadAuthored / (double)blockedOnRoad : 0.0,
+           wallPlanes.size());
     std::vector<std::pair<size_t, int>> ranked;
     for (const auto& kv : onRoadByMat) ranked.push_back({kv.second, kv.first});
     std::sort(ranked.rbegin(), ranked.rend());
