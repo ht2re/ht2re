@@ -62,7 +62,38 @@ So the authored collision covers practically the whole world, which is why
 switching to it can *replace* the visible-mesh heuristic in §5 instead of adding
 to it: every object with a proxy stops contributing its rendered geometry.
 
-### What the port still has to do
+### Implemented: the authored wall list (`--proxy-collision`)
+
+`B3D::collectHitProxies()` now walks the plane records **recursively** - a subtag-9
+record contains further subtag-9 records, each with its own subtag-23 extents, so one
+object's collision is a *tree* of bounded surfaces (missing that nesting was why an
+earlier pass found only 385 of them).  `Collision::setWalls()` keeps every vertical
+plane with an extent as
+
+```cpp
+struct AuthoredWall { float nx, nz, d; float x0,x1,z0,z1; std::vector<float> ring;
+                      float hLo, hHi; };
+```
+
+and `Collision::crossedWall(from, to, bottom, top, outX, outZ)` reports the first wall
+the motion segment crosses *inside its extent* and *inside the body's vertical slab*;
+`resolveMove()` consults it before the grid, so the car stops **at** the authored
+surface instead of one inflated cell short of it.  `--proxy-collision` turns it on;
+the default path (visible meshes only) is untouched.
+
+| measurement | default | `--proxy-collision` |
+|---|---|---|
+| grid cells | 927 081 | 927 081 (unchanged) |
+| authored walls | 0 | **5 993** from 2 034 proxies |
+| `collision_check --unit` | 0 failures | +6 wall checks, 0 failures |
+| drive west from the GAME.CNF start (30 s, starting heading -90°) | 195.1 m | **92.8 m**, stopped at x = -3112.8 |
+
+The last row is the interesting one: the truck stops at an **authored** wall
+(x ≈ -3113, the apron/terminal boundary) instead of running through the place where
+the port's scenery hack had removed the billboard.  So the authored data agrees with
+the authored geometry - the enclosure is real, and the port's ~1 m cell inflation was
+not the thing that stopped it there.
+
 
 The proxies are the *authored* collision, so using them replaces the guesswork in
 §5: a forest patch then blocks exactly its authored band, a fence exactly its

@@ -99,6 +99,33 @@ static int unitTest() {
     check("move away from the wall is free", free, true);
     free = c.resolveMove(-5, 0, 5, 0, 0.5f, ox, oz);
     check("a long step does not tunnel through", free, false);
+
+    // --- authored thin walls (docs/hit_proxies.md) --------------------------
+    // A wall is a plane with a finite extent: the crossing test must stop at the
+    // surface, ignore a move that stays on one side, ignore points outside the
+    // extent and ignore a height band that does not overlap the body's slab.
+    {
+        B3D::HitProxy p;
+        B3D::Wall w;
+        w.n[0] = 1.0f; w.n[1] = 0.0f; w.n[2] = 0.0f; w.n[3] = -100.0f;   // plane x = 100
+        w.ring = {99.5f, 0.0f, 4.0f, 100.5f, 0.0f, 4.0f,
+                  100.5f, 10.0f, 4.0f, 99.5f, 10.0f, 4.0f};             // thin strip
+        w.yMin = 0.0f;
+        w.haveBottom = true;
+        p.walls.push_back(w);
+        Collision wc;
+        wc.build({}, {p});
+        check("proxy wall is collected", wc.wallCount(), 1);
+        free = wc.resolveMove(98.0f, 5.0f, 102.0f, 5.0f, 1.0f, ox, oz, 0.0f, 2.0f);
+        check("crossing an authored wall is not free", free, false);
+        check("the car stops at the wall", ox < 100.0f && ox > 99.0f, true);
+        free = wc.resolveMove(98.0f, 5.0f, 99.0f, 5.0f, 1.0f, ox, oz, 0.0f, 2.0f);
+        check("stopping short of the wall is free", free, true);
+        free = wc.resolveMove(98.0f, 40.0f, 102.0f, 40.0f, 1.0f, ox, oz, 0.0f, 2.0f);
+        check("outside the wall extent is free", free, true);
+        free = wc.resolveMove(98.0f, 5.0f, 102.0f, 5.0f, 1.0f, ox, oz, 5.0f, 9.0f);
+        check("a body above the wall passes", free, true);
+    }
     printf("unit test: %d failure(s)\n\n", fails);
     return fails;
 }

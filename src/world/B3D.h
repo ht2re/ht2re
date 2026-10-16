@@ -83,6 +83,16 @@ public:
     // One authored collision proxy - the `hit_obj_*` / `hit_road_*` containers.
     // They are never drawn: the engine collides with *these* shapes, not with the
     // rendered meshes (docs/hit_proxies.md has the field layout and the evidence).
+    //
+    // A wall is a *surface*, not a volume: its plane is the impassable surface and
+    // its subtag-23 children carry the corner points that bound the segment, so the
+    // wall is a thin, finite quad (king.exe `perform_wall_collision`, 0x57e430).
+    struct Wall {
+        float n[4] = {0, 0, 0, 0};   // plane: n[0]*x + n[1]*z + n[2]*y + n[3] = 0
+        std::vector<float> ring;     // extent points, x, z, y triplets (subtag 23)
+        float yMin = 0.0f;
+        bool haveBottom = false;
+    };
     struct HitProxy {
         std::string name;            // hit_obj_ap_048
         std::string object;          // obj_ap_048, the visible object it describes
@@ -90,9 +100,10 @@ public:
         std::string linkTarget;      // subtag 18: 12-byte container name ("" = none)
         std::vector<float> poly;     // subtag 20, >=3 points: x,z,y triplets
         std::vector<float> segments; // subtag 20 with 2 points: x0,z0,x1,z1
-        std::vector<float> planes;   // subtag 9: nx, nz, ny, d (4 floats per plane)
+        std::vector<Wall> walls;     // subtag 9 + its subtag-23 extents
         float yMin = 0.0f;
         bool haveBottom = false;     // subtag 12 present
+        size_t wallCount() const { return walls.size(); }
     };
     const std::vector<HitProxy>& hitProxies() const { return hitProxies_; }
     // Filled by buildScene()/buildNamedScene().

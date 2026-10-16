@@ -226,6 +226,13 @@ SubMeshes on link-heavy tiles (aa, ad, aj, al, am).
   may still block another level. Player circle/sweep queries now accept
   `bottom, top` after the existing arguments and clip the actual wall triangles;
   callers omitting these parameters retain the old occupancy-grid behavior.
+* **The authored walls are a list, not cells (2026-10-16).** `Collision::setWalls()`
+  keeps the `hit_*` proxies' subtag-9 planes with their subtag-23 extents as bounded
+  zero-thickness walls and `resolveMove()` tests them by crossing
+  (`crossedWall`), before the grid - so a car stops *at* the authored surface
+  instead of a cell short of it.  `--proxy-collision` enables it (5 993 walls from
+  2 034 proxies); the default path is unchanged.  See
+  [hit_proxies.md](hit_proxies.md).
 * **Steep terrain blocks.**  `mat_mount*`, `mat_slope*`, swamp billboards and individual
   `mat_tree*` billboards with `|n_h| ≤ 0.8` are solid, so hillsides and lone trees are
   natural barriers.  This follows the brief's "block the rest"; adding `mount|slope` to

@@ -740,8 +740,45 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked, int 
 void B3D::collectHitProxies() {
     hitProxies_.clear();
     if (d.empty()) return;
+    // A plane record nests further plane records (each with its own subtag-23
+    // extents), so both are walked recursively: the collision of one object is a
+    // *tree* of bounded surfaces.
+    std::function<void(const Node&, std::vector<float>&, bool)> extents =
+        [&](const Node& n, std::vector<float>& ring, bool root) {
+            if (!root && n.subtag == 9) return;        // a nested plane is its own wall
+            if (n.subtag == 23) {
+                size_t pos = n.off + 40 + 16;          // the count sits at +16
+                while (pos + 4 <= n.end && pos + 4 <= d.size()) {
+                    uint32_t cnt = 0;
+                    memcpy(&cnt, d.data() + pos, 4);
+                    if (cnt < 2 || cnt > 256) break;
+                    const size_t p = pos + 4;
+                    if (p + 12 * (size_t)cnt > n.end || p + 12 * (size_t)cnt > d.size()) break;
+                    for (uint32_t v = 0; v < cnt; ++v) {
+                        float p3[3];
+                        memcpy(p3, d.data() + p + 12 * (size_t)v, 12);
+                        ring.push_back(p3[0]);
+                        ring.push_back(p3[1]);
+                        ring.push_back(p3[2]);
+                    }
+                    pos = p + 12 * (size_t)cnt;
+                }
+            }
+            for (const Node& k : n.kids) extents(k, ring, false);
+        };
+    std::function<void(const Node&, std::vector<Wall>&)> planes =
+        [&](const Node& n, std::vector<Wall>& out) {
+            if (n.subtag == 9 && n.params.size() >= 8) {
+                Wall w;
+                for (int i = 0; i < 4; ++i) w.n[i] = bitsToFloat(n.params[4 + i]);
+                extents(n, w.ring, true);
+                out.push_back(std::move(w));
+            }
+            for (const Node& k : n.kids) planes(k, out);
+        };
     struct Walker {
         B3D* self;
+        const std::function<void(const Node&, std::vector<Wall>&)>* planes = nullptr;
         void go(const Node& n) {
             if (n.name.rfind("hit_", 0) == 0 && !n.kids.empty()) {
                 HitProxy p;
@@ -772,8 +809,8 @@ void B3D::collectHitProxies() {
                                 p.poly.push_back(p3[2]);
                             }
                         }
-                    } else if (k.subtag == 9 && k.params.size() >= 8) {
-                        for (int i = 4; i < 8; ++i) p.planes.push_back(bitsToFloat(k.params[i]));
+                    } else if (k.subtag == 9) {
+                        if (planes) (*planes)(k, p.walls);   // the proxy's plane tree
                     } else if (k.subtag == 12 && k.params.size() >= 8) {
                         p.yMin = -bitsToFloat(k.params[7]);           // params[7] = -y_min
                         p.haveBottom = true;
@@ -782,11 +819,15 @@ void B3D::collectHitProxies() {
                         p.linkTarget = paramsName(k.params, 12);
                     }
                 }
+                for (Wall& w : p.walls) {          // the proxy's bottom applies to its walls
+                    w.yMin = p.yMin;
+                    w.haveBottom = p.haveBottom;
+                }
                 self->hitProxies_.push_back(std::move(p));
             }
             for (const Node& k : n.kids) go(k);
         }
-    } w{this};
+    } w{this, &planes};
     for (const Node& n : topNodes) w.go(n);
 }
 

@@ -245,8 +245,6 @@ void Collision::build(const std::vector<B3D::SubMesh>& meshes, float cellSize) {
     // --- pass 2: rasterise the wall-like triangles --------------------------
     for (size_t si = 0; si < meshes.size(); ++si) {
         const B3D::SubMesh& sm = meshes[si];
-        // Only the proxy overload fills this, for this very mesh list.
-        if (skipMesh_.size() == meshes.size() && skipMesh_[si]) continue;
         if (isGroundMaterial(sm.material)) continue;
         if (submeshExtent(sm) < kDecalMinExtent) continue;
         const size_t n = sm.idx.size();
@@ -323,81 +321,86 @@ void Collision::recountSolids() {
     stats_.cells = solidCells_;
 }
 
-std::vector<std::vector<std::pair<float, float>>>
-Collision::proxyRings(const std::vector<B3D::HitProxy>& proxies) {
-    std::vector<std::vector<std::pair<float, float>>> rings;
+// --- authored thin walls -----------------------------------------------------
+// A `hit_*` proxy's subtag-9 record is the impassable *surface* of an object and
+// its subtag-23 children bound that surface, so a wall is a finite zero-thickness
+// quad - exactly what king.exe's perform_wall_collision (0x57e430) treats it as.
+// A rasterised grid cannot hold such a surface without inflating it, so walls are
+// kept as their own list and tested by crossing (docs/hit_proxies.md).
+void Collision::setWalls(const std::vector<B3D::HitProxy>& proxies) {
+    authoredWalls_.clear();
     for (const B3D::HitProxy& p : proxies) {
-        if (p.poly.size() < 9) continue;                    // >= 3 points
-        std::vector<std::pair<float, float>> r;
-        for (size_t i = 0; i + 2 < p.poly.size(); i += 3) r.push_back({p.poly[i], p.poly[i + 1]});
-        if (r.size() >= 3) rings.push_back(std::move(r));
+        for (const B3D::Wall& w : p.walls) {
+            if (w.ring.size() < 6) continue;                     // needs >= 2 points
+            const float nlen = std::sqrt(w.n[0] * w.n[0] + w.n[1] * w.n[1]);
+            if (nlen < 1e-3f) continue;                          // vertical wall only
+            if (std::fabs(w.n[2]) > 0.5f * nlen) continue;       // horizontal: floor/roof
+            AuthoredWall aw;
+            aw.nx = w.n[0] / nlen;
+            aw.nz = w.n[1] / nlen;
+            aw.d = w.n[3] / nlen;
+            aw.ring = w.ring;
+            aw.x0 = aw.x1 = w.ring[0];
+            aw.z0 = aw.z1 = w.ring[1];
+            aw.hLo = w.haveBottom ? w.yMin : 1e30f;
+            aw.hHi = -1e30f;
+            for (size_t i = 0; i + 2 < w.ring.size(); i += 3) {
+                aw.x0 = std::min(aw.x0, w.ring[i]);
+                aw.x1 = std::max(aw.x1, w.ring[i]);
+                aw.z0 = std::min(aw.z0, w.ring[i + 1]);
+                aw.z1 = std::max(aw.z1, w.ring[i + 1]);
+                aw.hLo = std::min(aw.hLo, w.ring[i + 2]);
+                aw.hHi = std::max(aw.hHi, w.ring[i + 2]);
+            }
+            if (!(aw.hLo < 1e29f)) aw.hLo = aw.hHi;              // no subtag-12 bottom
+            authoredWalls_.push_back(std::move(aw));
+        }
     }
-    return rings;
+}
+
+bool Collision::crossedWall(float fromX, float fromZ, float toX, float toZ,
+                           float bottom, float top, float& outX, float& outZ) const {
+    if (top < bottom) return false;
+    float bestT = 2.0f;
+    for (const AuthoredWall& w : authoredWalls_) {
+        if (w.hHi < bottom || w.hLo > top) continue;             // another level
+        if (std::max(fromX, toX) < w.x0 || std::min(fromX, toX) > w.x1) continue;
+        if (std::max(fromZ, toZ) < w.z0 || std::min(fromZ, toZ) > w.z1) continue;
+        const float s0 = w.nx * fromX + w.nz * fromZ + w.d;
+        const float s1 = w.nx * toX + w.nz * toZ + w.d;
+        if ((s0 > 0.0f) == (s1 > 0.0f)) continue;                // no crossing
+        const float denom = s0 - s1;
+        if (std::fabs(denom) < 1e-9f) continue;
+        const float t = s0 / denom;
+        if (t < 0.0f || t > 1.0f || t >= bestT) continue;
+        const float px = fromX + (toX - fromX) * t;
+        const float pz = fromZ + (toZ - fromZ) * t;
+        const size_t n = w.ring.size() / 3;
+        bool in = false;
+        for (size_t a = 0, b = n - 1; a < n; b = a++) {
+            const float ax = w.ring[3 * a], az = w.ring[3 * a + 1];
+            const float bx = w.ring[3 * b], bz = w.ring[3 * b + 1];
+            if ((az > pz) != (bz > pz) &&
+                px < (bx - ax) * (pz - az) / (bz - az) + ax)
+                in = !in;
+        }
+        if (!in) continue;                                        // outside the extent
+        bestT = t;
+        outX = px;
+        outZ = pz;
+    }
+    return bestT <= 1.0f;
 }
 
 void Collision::build(const std::vector<B3D::SubMesh>& meshes,
                       const std::vector<B3D::HitProxy>& proxies) {
-    const auto rings = proxyRings(proxies);
-    // A submesh whose centre is inside an authored footprint is that same object
-    // drawn: the proxy already carries its solid shape.
-    skipMesh_.assign(meshes.size(), 0);
-    size_t covered = 0;
-    for (size_t i = 0; i < meshes.size(); ++i) {
-        const float cx = meshes[i].center[0], cz = meshes[i].center[1];
-        for (const auto& r : rings) {
-            float x0 = r[0].first, x1 = x0, z0 = r[0].second, z1 = z0;
-            for (const auto& q : r) {
-                x0 = std::min(x0, q.first); x1 = std::max(x1, q.first);
-                z0 = std::min(z0, q.second); z1 = std::max(z1, q.second);
-            }
-            if (cx < x0 || cx > x1 || cz < z0 || cz > z1) continue;
-            bool in = false;
-            for (size_t a = 0, b = r.size() - 1; a < r.size(); b = a++) {
-                if ((r[a].second > cz) != (r[b].second > cz) &&
-                    cx < (r[b].first - r[a].first) * (cz - r[a].second) /
-                             (r[b].second - r[a].second) + r[a].first)
-                    in = !in;
-            }
-            if (in) { skipMesh_[i] = 1; ++covered; break; }
-        }
-    }
-    build(meshes, defaultCellSize());
-
-    // ... and rasterise the authored footprints into the very same grid.
-    size_t painted = 0;
-    for (const auto& r : rings) {
-        float x0 = r[0].first, x1 = x0, z0 = r[0].second, z1 = z0;
-        for (const auto& q : r) {
-            x0 = std::min(x0, q.first); x1 = std::max(x1, q.first);
-            z0 = std::min(z0, q.second); z1 = std::max(z1, q.second);
-        }
-        const int i0 = std::max(0, (int)std::floor((x0 - x0_) / cell_));
-        const int i1 = std::min(nx_ - 1, (int)std::floor((x1 - x0_) / cell_));
-        const int j0 = std::max(0, (int)std::floor((z0 - z0_) / cell_));
-        const int j1 = std::min(nz_ - 1, (int)std::floor((z1 - z0_) / cell_));
-        for (int i = i0; i <= i1; ++i) {
-            const float px = x0_ + (i + 0.5f) * cell_;
-            if (px < x0 || px > x1) continue;
-            for (int j = j0; j <= j1; ++j) {
-                const float pz = z0_ + (j + 0.5f) * cell_;
-                if (pz < z0 || pz > z1) continue;
-                const size_t cellIdx = (size_t)i * (size_t)nz_ + (size_t)j;
-                if (bit(cellIdx)) continue;
-                bool in = false;
-                for (size_t a = 0, b = r.size() - 1; a < r.size(); b = a++) {
-                    if ((r[a].second > pz) != (r[b].second > pz) &&
-                        px < (r[b].first - r[a].first) * (pz - r[a].second) /
-                                 (r[b].second - r[a].second) + r[a].first)
-                        in = !in;
-                }
-                if (in) { setBit(cellIdx); ++painted; }
-            }
-        }
-    }
-    recountSolids();
-    LOG("collision: %zu authored proxy footprints painted %zu cells; %zu submeshes "
-        "were covered by a proxy and skipped by the visible-mesh rule",
-        rings.size(), painted, covered);
+    build(meshes);                       // the visible-mesh grid stays the baseline
+    setWalls(proxies);                   // ... and the authored surfaces go on top
+    LOG("collision: %zu authored thin walls from %zu proxies (%zu with an extent); "
+        "%zu grid cells", authoredWalls_.size(), proxies.size(),
+        std::count_if(authoredWalls_.begin(), authoredWalls_.end(),
+                      [](const AuthoredWall& w) { return w.ring.size() >= 6; }),
+        solidCells_);
 }
 
 bool Collision::blockedHeight(float x, float z, float r, float bottom, float top) const {
@@ -559,6 +562,28 @@ bool Collision::contactNormal(float x, float z, float r, float& outNx, float& ou
 
 bool Collision::resolveMove(float fromX, float fromZ, float toX, float toZ, float r,
                             float& outX, float& outZ, float bottom, float top) const {
+    if (bits_.empty() && authoredWalls_.empty()) {
+        outX = toX;
+        outZ = toZ;
+        return true;
+    }
+    // The authored thin walls (docs/hit_proxies.md) come first: they are exact
+    // surfaces, so the car stops *at* the plane instead of one cell short of it.
+    if (!authoredWalls_.empty()) {
+        float wx = 0, wz = 0;
+        if (crossedWall(fromX, fromZ, toX, toZ, bottom, top, wx, wz)) {
+            const float len = std::sqrt((toX - fromX) * (toX - fromX) +
+                                        (toZ - fromZ) * (toZ - fromZ));
+            if (len > 1e-4f) {                       // stop just before the surface
+                const float back = std::min(0.05f, len * 0.5f) / len;
+                wx -= (wx - fromX) * back;
+                wz -= (wz - fromZ) * back;
+            }
+            outX = wx;
+            outZ = wz;
+            return false;
+        }
+    }
     if (bits_.empty()) {
         outX = toX;
         outZ = toZ;
