@@ -275,6 +275,10 @@ private:
     // one log line per weather/draw-distance change (tests read it)
     int lastWeatherLog_ = -1;
     void rebuildWorldScene();
+    // Rebuild solid geometry after an ambush roadblock is added or hidden.
+    // Illumination and people gates do not call this: they are visual only.
+    void rebuildWorldCollision();
+    std::set<std::string> collisionAmbushSkip_;
     uint32_t rng_ = 0x51ED2701u;   // deterministic gameplay randomness
     std::set<std::string> hiddenGroups_;
     std::vector<B3D::SubMesh> worldVisible_;

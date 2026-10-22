@@ -174,6 +174,15 @@ void Vehicle::applySpec(const TechSpec& s) {
     gear_ = 0;
 }
 
+void Vehicle::setWheelbase(float metres) {
+    // The ZIL mesh measures 7.90 m front axle to rearmost axle, which is the
+    // constant the longitudinal model was checked against.  Keep that exact
+    // value so a ZIL does not drift off the calibrated straight-line path.
+    if (!(metres > 1.0f) || metres > 20.0f) return;
+    if (std::fabs(metres - WHEELBASE) < 0.01f) metres = WHEELBASE;
+    wheelbase_ = metres;
+}
+
 void Vehicle::addFuel(float amount) {
     // `fuel_` is a 0..1 fraction of tankLitres_ (the HUD, the service screen and
     // the save file all work in fractions), so `amount` is a fraction top-up.
@@ -453,7 +462,7 @@ void Vehicle::update(const Input& in, float dt) {
     float lockRad = kMaxSteerDeg * PI / 180.0f;
     // the driver winds less lock on at speed (idle_steering / steering_sence)
     lockRad *= 1.0f / (1.0f + sp * sp * 0.0022f);
-    float yawRate = speed_ * std::tan(lockRad * steer_) / WHEELBASE;   // rad/s
+    float yawRate = speed_ * std::tan(lockRad * steer_) / wheelbase_;  // rad/s
     float yawCap = kLateralGrip / std::max(1.0f, sp);                  // rad/s
     latAccel_ = std::fabs(yawRate) * sp;
     if (std::fabs(yawRate) > yawCap) {
@@ -505,7 +514,10 @@ void Vehicle::update(const Input& in, float dt) {
     // long truck cannot clip a wall with the trailer
     if (collision && !collision->empty() && (dx != 0 || dz != 0)) {
         const float rad = halfWidth();
-        const float off = halfLength() * 0.5f;
+        // 0.3 * wheelbase == halfLength()*0.5 for the ZIL constant, so that
+        // truck's two contact circles stay where they were.  A car's measured
+        // axle span pulls the circles in with the body.
+        const float off = wheelbase_ * 0.3f;
         float ox, oz;
         bool ok = true;
         for (int end = -1; end <= 1 && ok; end += 2) {
@@ -540,8 +552,8 @@ void Vehicle::update(const Input& in, float dt) {
             return std::fabs(contact-h)>climbLimit ? h : contact;
         };
         // sample the ground at the four wheel contact points for pitch/roll
-        float hf = contactY(x_ + fx * WHEELBASE * 0.5f, z_ + fz * WHEELBASE * 0.5f);
-        float hr = contactY(x_ - fx * WHEELBASE * 0.5f, z_ - fz * WHEELBASE * 0.5f);
+        float hf = contactY(x_ + fx * wheelbase_ * 0.5f, z_ + fz * wheelbase_ * 0.5f);
+        float hr = contactY(x_ - fx * wheelbase_ * 0.5f, z_ - fz * wheelbase_ * 0.5f);
         float lx = -fz, lz = fx;                  // left vector
         float hl = contactY(x_ + lx * TRACK * 0.5f, z_ + lz * TRACK * 0.5f);
         float hr2 = contactY(x_ - lx * TRACK * 0.5f, z_ - lz * TRACK * 0.5f);
@@ -562,7 +574,7 @@ void Vehicle::update(const Input& in, float dt) {
             // cannot leave the chassis below the newly reached contact plane.
             if (y_ < targetY) y_ = targetY;
         }
-        float targetPitch = atan2f(hf - hr, WHEELBASE) * 180.0f / PI;
+        float targetPitch = atan2f(hf - hr, wheelbase_) * 180.0f / PI;
         float targetRoll = atan2f(hr2 - hl, TRACK) * 180.0f / PI;
         pitch_ += (targetPitch - pitch_) * 0.2f;
         roll_ += (targetRoll - roll_) * 0.2f;

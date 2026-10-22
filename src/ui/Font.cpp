@@ -340,6 +340,25 @@ bool Font::loadFon(Renderer& r, const std::string& path) {
         g.w = cellW_;
         g.h = glyphH_;
         g.advance = cellW_;
+        // icon.fon (25px cells). king.exe 0x1ea0e0 sums the per-glyph width
+        // scanned from row 0 of the cell (the solid bar above the digit, not
+        // drawn). That bar is 11px for the HUD digits and 9px for the colon;
+        // advancing the whole 25px cell is what shoved «33:03» into the next
+        // field. matrix.fon stays on the cell pitch: its row 0 is a full-width
+        // marker, and the labels are authored for that pitch.
+        if (cellW_ >= 16) {
+            const int strip = c >> 4, col = c & 15;
+            const int sy = strip * cellH_;
+            const int srcy = topDown ? sy : (h - 1 - sy);
+            int right = -1;
+            for (int rx = 0; rx < cellW_; ++rx) {
+                const size_t off = pixOff + ((size_t)srcy * w + (col * cellW_ + rx)) * bpp;
+                const uint8_t v = bpp == 1 ? d[off]
+                    : (uint8_t)(d[off] | (d[off + 1] << 8));
+                if (v) right = rx;
+            }
+            if (right >= 0) g.advance = right + 1;
+        }
     }
     LOG("font: %s %s %dx%d atlas, cell %dx%d, glyph %dx%d", path.c_str(),
         loff ? "LOFF/16bpp" : "plain/8bpp", w, h, cellW_, cellH_, cellW_, glyphH_);

@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -125,6 +126,24 @@ static int unitTest() {
         check("outside the wall extent is free", free, true);
         free = wc.resolveMove(98.0f, 5.0f, 102.0f, 5.0f, 1.0f, ox, oz, 5.0f, 9.0f);
         check("a body above the wall passes", free, true);
+    }
+    // A second wall in its own group blocks until that group is skipped —
+    // the ambush roadblock is hidden this way when the player drives away.
+    {
+        B3D::SubMesh gate = wall;
+        gate.name = "ambush_car";
+        gate.material = "mat_body";
+        gate.group = "ht2_ambush_0";
+        gate.pos = {8.0f, -2, 0, 8.0f, 2, 0, 8.0f, 2, 3, 8.0f, -2, 3};
+        std::set<std::string> skip;
+        skip.insert(gate.group);
+        Collision shown;
+        shown.build({wall, gate}, 1.0f, nullptr);
+        check("roadblock blocks while its group is shown", shown.blocked(8.0f, 0.0f, 0.0f), true);
+        Collision hidden;
+        hidden.build({wall, gate}, 1.0f, &skip);
+        check("hidden roadblock does not block", hidden.blocked(8.0f, 0.0f, 0.0f), false);
+        check("the other wall still blocks", hidden.blocked(2.5f, 0.0f, 0.0f), true);
     }
     printf("unit test: %d failure(s)\n\n", fails);
     return fails;

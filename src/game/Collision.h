@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <array>
 #include <limits>
+#include <set>
+#include <string>
 #include <unordered_map>
 #include "../world/B3D.h"
 
@@ -41,7 +43,10 @@ public:
     // B3D::buildFrom produces and the renderer draws.
     void build(const std::vector<B3D::SubMesh>& meshes);
     // Same, with an explicit grid cell size (default kDefaultCellSize metres).
-    void build(const std::vector<B3D::SubMesh>& meshes, float cellSize);
+    // `skipGroups`, when set, drops those submesh groups: an ambush roadblock
+    // stays in the world list while it is hidden, and must not keep blocking.
+    void build(const std::vector<B3D::SubMesh>& meshes, float cellSize,
+               const std::set<std::string>* skipGroups = nullptr);
     // Build from the authored collision proxies (docs/hit_proxies.md).  A proxy's
     // footprint polygon IS the authored solid shape of its object, so the rendered
     // mesh of that object must not block again (same obstacle, drawn): a submesh

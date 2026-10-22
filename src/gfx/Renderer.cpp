@@ -911,6 +911,14 @@ void Renderer::beginTraffic(float cx, float cy, float cz, float yawDeg, float pi
     gl.glUniform3f(uFogColor, fogR, fogG, fogB);
     gl.glUniform1f(uAmbient, ambient);
     gl.glUniform1f(uSunAmt, sunAmount);
+    // The cars sit on the asphalt. A small pull toward the camera keeps the
+    // road texture from showing through the body and the wheels.
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(-1.5f, -6.0f);
+}
+
+void Renderer::endTraffic() {
+    glDisable(GL_POLYGON_OFFSET_FILL);
 }
 
 void Renderer::drawTrafficInstance(int model, const Mat4& m) {
@@ -1058,7 +1066,10 @@ void Renderer::drawVehicleScene(float cx, float cy, float cz, float yawDeg, floa
     gl.glUniform1f(uAmbient, ambient);
     gl.glUniform1f(uSunAmt, sunAmount);
     gl.glUniformMatrix4fv(uModel, 1, GL_FALSE, model.m);
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(-1.5f, -6.0f);
     drawRanges(vvao, vehicleRanges);
+    glDisable(GL_POLYGON_OFFSET_FILL);
     Mat4 ident;
     gl.glUniformMatrix4fv(uModel, 1, GL_FALSE, ident.m);
 }
@@ -1203,8 +1214,11 @@ void Renderer::draw(float cx, float cy, float cz, float yawDeg, float pitchDeg) 
     // pitch.  A polygon offset on the ground pass (positive = away from the
     // camera) is the depth-space half of that; the geometric half is the
     // clearance groundProfile() keeps below the tile surface.
+    // Positive offset pushes the terrain sheet away from the camera so the
+    // tile asphalt, drawn next with no offset, wins even at a grazing angle.
+    // A factor of 1 was not enough: the road still flickered as the cab moved.
     glEnable(GL_POLYGON_OFFSET_FILL);
-    glPolygonOffset(1.0f, 4.0f);
+    glPolygonOffset(4.0f, 24.0f);
     drawRanges(vao, rs);
     glDisable(GL_POLYGON_OFFSET_FILL);
 }
@@ -1247,6 +1261,7 @@ void Renderer::drawScene(float cx, float cy, float cz, float yawDeg, float pitch
 void Renderer::begin2D() {
     sprites.clear();
     in2D = true;
+    glDisable(GL_POLYGON_OFFSET_FILL);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glEnable(GL_BLEND);

@@ -850,7 +850,7 @@ void EscMenu::refresh() {
         }
         // the job the ЗАКАЗ / ДИСПЕТЧЕРСКАЯ panels show (nearest pickup)
         if (!c.economy->jobs().empty()) {
-            std::vector<size_t> near = c.economy->jobsNear(d.posX, d.posZ, 1.0e9f);
+            std::vector<size_t> near = c.economy->jobsForPlayer(d.posX, d.posZ, 1.0e9f);
             if (!near.empty()) {
                 const Economy::Job& j = c.economy->jobs()[near[0]];
                 d.orderIndex = (int)near[0];
@@ -863,7 +863,7 @@ void EscMenu::refresh() {
                 snprintf(v, sizeof v, "%.1f", j.volume);
                 d.orderVolume = v;
                 d.orderIllegal = j.illegal;
-                d.jobsNear = c.economy->jobsNear(d.posX, d.posZ, 250.0f).size();
+                d.jobsNear = c.economy->jobsForPlayer(d.posX, d.posZ, 250.0f).size();
                 // the dispatcher board: the 10 nearest jobs
                 for (size_t k = 0; k < near.size() && (int)d.table.size() < 10; ++k) {
                     const Economy::Job& jj = c.economy->jobs()[near[k]];

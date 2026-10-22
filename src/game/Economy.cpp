@@ -398,6 +398,8 @@ void Economy::buildJobs(const GameData& gd) {
                 s.job.toNode = towns_[b].unloadNode;
                 s.job.weight = c->weight;
                 s.job.volume = c->volume;
+                s.job.truckOk = c->truckOk;
+                s.job.carOk = c->carOk;
                 s.job.illegal = c->illegal;
                 s.job.mafia = c->mafia;
                 specs_.push_back(s);
@@ -550,6 +552,34 @@ int Economy::dealerNear(float x, float z, float radius) const {
 // ---------------------------------------------------------------------------
 // jobs
 // ---------------------------------------------------------------------------
+
+std::string Economy::playerKlass() const {
+    for (const auto& o : offers_)
+        if (!playerId_.empty() && o.id == playerId_) return o.klass;
+    for (const auto& o : offers_)
+        if (o.model == playerModel_ && o.variant == playerVariant_) return o.klass;
+    for (const auto& o : offers_)
+        if (o.model == playerModel_) return o.klass;
+    return {};
+}
+
+bool Economy::canCarry(const Job& job) const {
+    const std::string k = playerKlass();
+    const bool truck = k == "lorry" || k == "tractor" || k == "semitrailer";
+    const bool car = k == "car";
+    if (truck == car) return true;                 // class unknown: do not hide cargo
+    if (job.truckOk == job.carOk) return true;     // both tags, or neither
+    return truck ? job.truckOk : job.carOk;
+}
+
+std::vector<size_t> Economy::jobsForPlayer(float x, float z, float radius) const {
+    std::vector<size_t> near = jobsNear(x, z, radius);
+    std::vector<size_t> out;
+    out.reserve(near.size());
+    for (size_t i : near)
+        if (canCarry(jobs_[i])) out.push_back(i);
+    return out;
+}
 
 std::vector<size_t> Economy::jobsNear(float x, float z, float radius) const {
     std::vector<std::pair<float, size_t>> hits;

@@ -181,6 +181,10 @@ float submeshExtent(const B3D::SubMesh& sm) {
     return hi - lo;
 }
 
+bool skippedGroup(const B3D::SubMesh& sm, const std::set<std::string>* skipGroups) {
+    return skipGroups && !sm.group.empty() && skipGroups->count(sm.group) != 0;
+}
+
 } // namespace
 
 float Collision::defaultCellSize() { return 1.0f; }
@@ -200,7 +204,8 @@ void Collision::build(const std::vector<B3D::SubMesh>& meshes) {
     build(meshes, defaultCellSize());
 }
 
-void Collision::build(const std::vector<B3D::SubMesh>& meshes, float cellSize) {
+void Collision::build(const std::vector<B3D::SubMesh>& meshes, float cellSize,
+                      const std::set<std::string>* skipGroups) {
     clear();
     cell_ = (cellSize >= kMinCell && cellSize <= kMaxCell) ? cellSize
                                                            : defaultCellSize();
@@ -209,6 +214,7 @@ void Collision::build(const std::vector<B3D::SubMesh>& meshes, float cellSize) {
     // --- pass 1: bounds of everything that can block ------------------------
     float mnx = 1e30f, mnz = 1e30f, mxx = -1e30f, mxz = -1e30f;
     for (const B3D::SubMesh& sm : meshes) {
+        if (skippedGroup(sm, skipGroups)) continue;
         if (isGroundMaterial(sm.material)) { ++stats_.ground; continue; }
         if (submeshExtent(sm) < kDecalMinExtent) { ++stats_.flat; continue; }
         for (size_t i = 0; i + 2 < sm.pos.size(); i += 3) {
@@ -245,6 +251,7 @@ void Collision::build(const std::vector<B3D::SubMesh>& meshes, float cellSize) {
     // --- pass 2: rasterise the wall-like triangles --------------------------
     for (size_t si = 0; si < meshes.size(); ++si) {
         const B3D::SubMesh& sm = meshes[si];
+        if (skippedGroup(sm, skipGroups)) continue;
         if (isGroundMaterial(sm.material)) continue;
         if (submeshExtent(sm) < kDecalMinExtent) continue;
         const size_t n = sm.idx.size();

@@ -81,6 +81,7 @@ public:
     size_t trafficTriangles() const;
     // camera setup for a traffic pass, then one call per instance
     void beginTraffic(float camX, float camY, float camZ, float yawDeg, float pitchDeg);
+    void endTraffic();
     void drawTrafficInstance(int model, const Mat4& m);
     // Traffic instances submitted / rejected by the view-distance cull since the
     // last beginTraffic() (diagnostics, printed under HT2_CULL_DEBUG).

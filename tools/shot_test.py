@@ -484,14 +484,14 @@ check("HUD strip spans the top of the screen", strip > 0.6 * w * 34, f"{strip} p
 ink = count(rows, 0, w, 2, 36,
             lambda c: c[0] > 150 and c[1] > 110 and c[2] < 170 and c[0] > c[2] + 40)
 check("readouts drawn inside the strip", ink > 250, f"{ink} ink px")
-# The label row of both LED windows carries matrix.fon words the original only
-# draws there (ПОЗИЦИЯ / ОСТ.ВРЕМЯ and АККИ), so their ink is what identifies the
-# cells; a plain chrome probe could not tell them apart.
-pos = count(rows, 480, 700, 4, 16, lambda c: c[0] > 150 and c[1] > 140 and c[2] > 60)
-check("ПОЗИЦИЯ / ОСТ.ВРЕМЯ labels drawn in the first LED window", pos > 120,
+# Labels sit at the exe's text base (469 at 1280) plus the field offsets, with
+# the glyph hanging above the pushed y. ОСТ.ВРЕМЯ is always drawn (x 554, y
+# 11..23). АКПП is the automatic-box format at x 845.
+pos = count(rows, 540, 680, 8, 26, lambda c: c[0] > 150 and c[1] > 140 and c[2] > 60)
+check("ОСТ.ВРЕМЯ label drawn in the first LED window", pos > 120,
       f"{pos} label px")
-akki = count(rows, 780, 900, 4, 16, lambda c: c[0] > 150 and c[1] > 140 and c[2] > 60)
-check("АККИ tacho label drawn in the second LED window", akki > 40, f"{akki} label px")
+akki = count(rows, 830, 980, 8, 26, lambda c: c[0] > 150 and c[1] > 140 and c[2] > 60)
+check("АКПП gear label drawn in the second LED window", akki > 40, f"{akki} label px")
 m = re.search(r"map: panel ([\d.]+)x([\d.]+) at ([\d.]+),([\d.]+) scale ([\d.]+) \| "
               r"(\d+) road polylines drawn, (\d+) labels", out)
 check("the road map draws its roads and settlement labels",
@@ -517,10 +517,12 @@ check("the strip shows the job time and rpm when a job is active",
       re.fullmatch(r"\d\d:\d\d", mj.group(5)) and int(mj.group(7)) > 0,
       f"pos={mj.group(4)} time={mj.group(5)} rpm={mj.group(7)}" if mj else "no hud line")
 w, h, rows = read_bmp(os.path.join(OUT, "hud_job.bmp"))
-posv = count(rows, 560, 700, 18, 34, lambda c: c[0] > 150 and c[1] > 140 and c[2] > 60)
-timg = count(rows, 710, 800, 18, 34, lambda c: c[0] > 150 and c[1] > 140 and c[2] > 60)
-check("ПОЗИЦИЯ value and ОСТ.ВРЕМЯ digits are drawn", posv > 40 and timg > 40,
-      f"{posv} km-value px, {timg} time px")
+# ОСТ.ВРЕМЯ digits are icon.fon at x 554 (y 13..43). Speed is right-aligned
+# to x 756. ПОЗИЦИЯ's «1 из 2» sits further left and is not in these rects.
+posv = count(rows, 540, 700, 16, 44, lambda c: c[0] > 150 and c[1] > 140 and c[2] > 60)
+timg = count(rows, 700, 790, 8, 42, lambda c: c[0] > 150 and c[1] > 140 and c[2] > 60)
+check("ОСТ.ВРЕМЯ digits and the speed readout are drawn", posv > 40 and timg > 40,
+      f"{posv} time px, {timg} speed px")
 
 # ------------------------------------------------------------------- events
 # The two event types the retail frames show and the port did not have:
@@ -534,10 +536,11 @@ check("the speed camera panel reports the limit, the speed and the fine",
       "fine: panel shown (limit 60, speed 82" in out,
       [l for l in out.splitlines() if "fine:" in l][-1:][0][-60:] if "fine:" in out else "no line")
 w, h, rows = read_bmp(os.path.join(OUT, "fine.bmp"))
-# the red header bar of the panel, upper right, under the strip
-hdr = count(rows, 1040, 1265, 60, 90, lambda c: c[0] > 90 and c[0] > c[1] + 30 and c[0] > c[2] + 30)
+# mess16.msk is 220×230 at (screenW-220, 50). The red title band is the
+# mask's own header (local y ~20..70); "$%d" is centred at baseline 261.
+hdr = count(rows, 1070, 1270, 70, 120, lambda c: c[0] > 90 and c[0] > c[1] + 30 and c[0] > c[2] + 30)
 check("the fine panel is drawn in the upper right", hdr > 1500, f"{hdr} red header px")
-amt = count(rows, 1040, 1265, 350, 380, lambda c: c[0] > 150 and c[1] > 130 and c[2] < 160)
+amt = count(rows, 1100, 1240, 245, 265, lambda c: c[0] > 150 and c[1] > 130 and c[2] < 160)
 check("the fine amount is drawn on the panel", amt > 40, f"{amt} amount px")
 
 # the real trigger path: drive over the limit through a speed-limit zone (the

@@ -888,6 +888,35 @@ static void modelBody(const std::vector<B3D::SubMesh>& subs, float& length, floa
     if (height) *height = any ? std::max(0.5f, hi - lo) : 1.8f;
 }
 
+// Front-axle to rearmost-axle span of the assembled body, from the wheel
+// meshes.  The ZIL span is 7.90 m — the constant Vehicle was measured with.
+// A bought car must not keep that lorry wheelbase.
+static float axleSpan(const std::vector<B3D::SubMesh>& subs) {
+    std::vector<float> zc;
+    for (const auto& sm : subs) {
+        std::string m = sm.material;
+        for (char& c : m)
+            if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (m.find("wheel") == std::string::npos) continue;
+        double s = 0.0;
+        int n = 0;
+        for (size_t i = 1; i + 1 < sm.pos.size(); i += 3) {
+            s += sm.pos[i];
+            ++n;
+        }
+        if (n) zc.push_back((float)(s / (double)n));
+    }
+    if (zc.size() < 2) return 0.0f;
+    std::sort(zc.begin(), zc.end());
+    std::vector<float> axles;
+    for (float z : zc) {
+        if (axles.empty() || z - axles.back() > 0.4f) axles.push_back(z);
+        else axles.back() = 0.5f * (axles.back() + z);
+    }
+    if (axles.size() < 2) return 0.0f;
+    return axles.back() - axles.front();
+}
+
 // ---------------------------------------------------------------------------
 // AI traffic: the road graph is every RSEG polyline of every tile, welded at
 // exactly coincident endpoints (verified: the shipped endpoints coincide).
@@ -1076,9 +1105,11 @@ void App::refreshPlayerBody() {
                 lo=std::min(lo,sm.pos[i]); hi=std::max(hi,sm.pos[i]);
             }
         if (hi>=lo) vehicle3d_.setCollisionHeight(hi-lo);
+        const float span = axleSpan(trucks_.submeshes());
+        if (span > 1.0f) vehicle3d_.setWheelbase(span);
     }
-    LOG("traffic: player body %.2f x %.2f m", (double)playerLength_,
-        (double)(2.0f * playerRadius_));
+    LOG("traffic: player body %.2f x %.2f m, axle span %.2f m", (double)playerLength_,
+        (double)(2.0f * playerRadius_), (double)vehicle3d_.wheelbase());
 }
 
 // What the AI did to the player this frame: the pushback out of every car it
@@ -1162,6 +1193,7 @@ void App::drawTraffic(float cx, float cy, float cz, float yaw, float pitch) {
             m = m * Mat4::translation(0,trafficYOff_[(size_t)c.model],0);
         r_.drawTrafficInstance(batch, m);
     }
+    r_.endTraffic();
 }
 
 void App::buildMinimapTexture() {
@@ -1377,8 +1409,11 @@ void App::initEconomy() {
     economy_.init(gameData_);
     initServices();
     initAmbushes();
-    LOG("economy: money %ld, offers %zu, jobs %zu", economy_.money(),
-        economy_.offers().size(), economy_.jobs().size());
+    if (!opt_.vehicle.empty() && opt_.vehicle != economy_.playerModel())
+        economy_.restorePlayerModel(opt_.vehicle);
+    LOG("economy: money %ld, offers %zu, jobs %zu, carrier %s (%s)", economy_.money(),
+        economy_.offers().size(), economy_.jobs().size(),
+        economy_.playerModel().c_str(), economy_.playerKlass().c_str());
 }
 
 bool App::switchPlayerVehicle(const std::string& model) {
@@ -1415,23 +1450,25 @@ void App::applyEconomyActions() {
         }
     }
     if (opt_.acceptJob >= 0 && !economy_.jobs().empty()) {
-        std::vector<size_t> near = economy_.jobsNear(vehicle3d_.x(), vehicle3d_.z(), 1.0e9f);
+        std::vector<size_t> near = economy_.jobsForPlayer(vehicle3d_.x(), vehicle3d_.z(), 1.0e9f);
         if (!near.empty()) {
             size_t idx = near[(size_t)std::min<size_t>((size_t)opt_.acceptJob, near.size() - 1)];
             if (economy_.accept(idx)) {
                 const Economy::Job& j = economy_.jobs()[idx];
-                LOG("economy: job accepted: %s -> %s, %.0f m, reward %ld",
-                    j.fromTown.c_str(), j.toTown.c_str(), j.distance, j.reward);
+                LOG("economy: job accepted: %s -> %s, %.0f m, reward %ld, cargo %s",
+                    j.fromTown.c_str(), j.toTown.c_str(), j.distance, j.reward,
+                    j.cargoId.c_str());
             }
         }
     }
     // --job: take the nearest job (tests: the strip's ПОЗИЦИЯ/ОСТ.ВРЕМЯ cells)
     if (opt_.jobGiven && !economy_.activeJob()) {
-        std::vector<size_t> near = economy_.jobsNear(vehicle3d_.x(), vehicle3d_.z(), 1.0e9f);
+        std::vector<size_t> near = economy_.jobsForPlayer(vehicle3d_.x(), vehicle3d_.z(), 1.0e9f);
         if (!near.empty() && economy_.accept(near[0])) {
             const Economy::Job& j = economy_.jobs()[near[0]];
-            LOG("economy: job accepted (--job): %s -> %s, %.0f m, reward %ld, time %.1f s",
-                j.fromTown.c_str(), j.toTown.c_str(), j.distance, j.reward, j.timeLeft);
+            LOG("economy: job accepted (--job): %s -> %s, %.0f m, reward %ld, time %.1f s, cargo %s",
+                j.fromTown.c_str(), j.toTown.c_str(), j.distance, j.reward, j.timeLeft,
+                j.cargoId.c_str());
         } else {
             LOG("economy: --job found no job to accept");
         }
@@ -1728,13 +1765,16 @@ void App::updateAmbushes() {
         // script-controlled hidden groups.  Clearing the set made every gated
         // object flash visible for the frame in which an ambush appeared.
         rebuildWorldScene();
+        // The cars are in the world list now.  Without a rebuild the roadblock
+        // is drawn and the truck drives straight through it.
+        rebuildWorldCollision();
         if (input_.rumbleSupported()) input_.rumble(0.9f, 0.6f, 400);
         break;
     }
 }
 
 float App::nearJobDist() const {
-    std::vector<size_t> near = economy_.jobsNear(vehicle3d_.x(), vehicle3d_.z(), 60.0f);
+    std::vector<size_t> near = economy_.jobsForPlayer(vehicle3d_.x(), vehicle3d_.z(), 60.0f);
     if (near.empty()) return -1.0f;
     const Economy::Job& j = economy_.jobs()[near[0]];
     float dx = j.fromX - vehicle3d_.x(), dz = j.fromZ - vehicle3d_.z();
@@ -1818,8 +1858,28 @@ void App::updateGates() {
         }
     }
     if (hidden == hiddenGroups_) return;
+    std::set<std::string> nextSkip;
+    for (const auto& a : ambushes_)
+        if (!a.group.empty() && hidden.count(a.group)) nextSkip.insert(a.group);
+    const bool ambushSolids = nextSkip != collisionAmbushSkip_;
     hiddenGroups_ = hidden;
     rebuildWorldScene();
+    // A hidden roadblock must stop being a wall, and a shown one must become
+    // one.  Other hidden groups (lights, people) are not collision.
+    if (ambushSolids) rebuildWorldCollision();
+}
+
+void App::rebuildWorldCollision() {
+    if (opt_.noCollision) return;
+    std::set<std::string> skip;
+    for (const auto& a : ambushes_)
+        if (!a.group.empty() && hiddenGroups_.count(a.group)) skip.insert(a.group);
+    collisionAmbushSkip_ = skip;
+    collision_.build(worldMeshes_, Collision::defaultCellSize(),
+                     skip.empty() ? nullptr : &skip);
+    if (opt_.proxyCollision && !worldProxies_.empty())
+        collision_.setWalls(worldProxies_);
+    vehicle3d_.setCollision(&collision_);
 }
 
 void App::rebuildWorldScene() {
@@ -2267,11 +2327,14 @@ void App::escAction(const std::string& act) {
     }
     if (act == "acceptjob") {
         const int idx = esc_.selectedJob();
-        if (idx >= 0 && economy_.accept((size_t)idx)) {
+        if (idx >= 0 && (size_t)idx < economy_.jobs().size() &&
+            economy_.canCarry(economy_.jobs()[(size_t)idx]) &&
+            economy_.accept((size_t)idx)) {
             const Economy::Job* j = economy_.activeJob();
-            LOG("ui: job accepted: %s -> %s, %.0f m, reward %ld",
+            LOG("ui: job accepted: %s -> %s, %.0f m, reward %ld, cargo %s",
                 j ? j->fromTown.c_str() : "?", j ? j->toTown.c_str() : "?",
-                j ? j->distance : 0.0f, j ? j->reward : 0);
+                j ? j->distance : 0.0f, j ? j->reward : 0,
+                j ? j->cargoId.c_str() : "?");
         } else LOG("ui: no job to accept");
         return;
     }
@@ -3226,7 +3289,7 @@ void App::drawWorld(float dt, bool interactive) {
                     openPanel("sale");
             }
             if (st.job) {
-                std::vector<size_t> near = economy_.jobsNear(vehicle3d_.x(), vehicle3d_.z(), 120.0f);
+                std::vector<size_t> near = economy_.jobsForPlayer(vehicle3d_.x(), vehicle3d_.z(), 120.0f);
                 if (!near.empty()) openPanel("order");
             }
             if (st.deliver) {
@@ -3376,13 +3439,16 @@ void App::drawWorld(float dt, bool interactive) {
         hv.money = economy_.money();
         hv.clockHours = timeOfDay_;
         hv.level = (int)(vehicle3d_.damage() * 9.0f + 0.5f);
-        // «ПОЗИЦИЯ»: the destination town and its distance (the original shows
-        // «2 км 3»); «ОСТ.ВРЕМЯ»: the job's remaining contract time.
+        // «ПОЗИЦИЯ» is the destination's city index «из» its city count
+        // (king.exe stores both 0-based at +0x210/+0x20c and draws them +1).
+        // A port order is one from→to pair, so the strip reads 1 из 2.
         std::string destName;
         if (const Economy::Job* aj = economy_.activeJob()) {
             hv.distanceToDest = economy_.distance2D(vehicle3d_.x(), vehicle3d_.z(),
                                                     aj->toX, aj->toZ);
             hv.haveDest = true;
+            hv.posCur = 1;
+            hv.posTotal = 2;
             destName = aj->toTown;
             hv.destName = destName.c_str();
             // the route highlight of the map (the reference frame's blue box)
@@ -3394,7 +3460,7 @@ void App::drawWorld(float dt, bool interactive) {
         const std::string jt = opt_.jobTime.empty() ? economy_.jobTimeText() : opt_.jobTime;
         hv.jobTime = jt.c_str();
         hv.jobOverdue = economy_.jobOverdue();
-        const int near = (int)economy_.jobsNear(vehicle3d_.x(), vehicle3d_.z(), 200.0f).size();
+        const int near = (int)economy_.jobsForPlayer(vehicle3d_.x(), vehicle3d_.z(), 200.0f).size();
         hv.jobCount = near;
         if (msgTimer_ > 0.0f) {
             hv.message = msgText_;
@@ -3421,20 +3487,24 @@ void App::drawWorld(float dt, bool interactive) {
         font_.draw(r_, msgText_, bx + 20.0f, by + 12.0f, 1.6f, 1.0f, 0.97f, 0.75f, a);
     }
     if (!esc_.active()) {
-        const bool ambushActive = scriptRuntime_ && std::any_of(
-            scriptRuntime_->ambushes().begin(), scriptRuntime_->ambushes().end(),
-            [](const ht2::AmbushState& a) { return a.active; });
-        if (ambushActive && msgTimer_ <= 0.0f)
-            font_.draw(r_, "AMBUSH!", 16, (float)r_.height_ - 30, 1.3f, 1.0f, 0.4f, 0.35f, 1.0f);
-        if (nearestService(true) >= 0 && vehicle3d_.fuel() < 0.95f)
-            font_.draw(r_, "PRESS TAB TO REFUEL", 16, (float)r_.height_ - 30, 1.2f, 0.5f, 1.0f, 0.6f, 1.0f);
-        else if (nearestService(false) >= 0 && vehicle3d_.damage() > 0.05f)
-            font_.draw(r_, "PRESS TAB TO REPAIR", 16, (float)r_.height_ - 30, 1.2f, 0.5f, 0.9f, 1.0f, 1.0f);
-        if (nearJobDist() >= 0.0f)
-            font_.draw(r_, "PRESS T TO TAKE THE CARGO JOB", 16, (float)r_.height_ - 30, 1.2f,
-                       1.0f, 0.9f, 0.4f, 1.0f);
-        font_.draw(r_, "F1-F3: HELP  F4: COMPANY  F5: CB RADIO  W/S: THROTTLE  A/D: STEER  SPACE: BRAKE  C/V: VIEW  ESC: MENU",
-                   16, (float)r_.height_ - 16, 1.0f, 0.85f, 0.87f, 0.92f, 0.9f);
+        // The original strip has no English prompt line. Those hints stay only
+        // on the fallback dashboard, when the tablo art did not load.
+        if (!hud_.loaded()) {
+            const bool ambushActive = scriptRuntime_ && std::any_of(
+                scriptRuntime_->ambushes().begin(), scriptRuntime_->ambushes().end(),
+                [](const ht2::AmbushState& a) { return a.active; });
+            if (ambushActive && msgTimer_ <= 0.0f)
+                font_.draw(r_, "AMBUSH!", 16, (float)r_.height_ - 30, 1.3f, 1.0f, 0.4f, 0.35f, 1.0f);
+            if (nearestService(true) >= 0 && vehicle3d_.fuel() < 0.95f)
+                font_.draw(r_, "PRESS TAB TO REFUEL", 16, (float)r_.height_ - 30, 1.2f, 0.5f, 1.0f, 0.6f, 1.0f);
+            else if (nearestService(false) >= 0 && vehicle3d_.damage() > 0.05f)
+                font_.draw(r_, "PRESS TAB TO REPAIR", 16, (float)r_.height_ - 30, 1.2f, 0.5f, 0.9f, 1.0f, 1.0f);
+            if (nearJobDist() >= 0.0f)
+                font_.draw(r_, "PRESS T TO TAKE THE CARGO JOB", 16, (float)r_.height_ - 30, 1.2f,
+                           1.0f, 0.9f, 0.4f, 1.0f);
+            font_.draw(r_, "F1-F3: HELP  F4: COMPANY  F5: CB RADIO  W/S: THROTTLE  A/D: STEER  SPACE: BRAKE  C/V: VIEW  ESC: MENU",
+                       16, (float)r_.height_ - 16, 1.0f, 0.85f, 0.87f, 0.92f, 0.9f);
+        }
     } else if (hud_.loaded()) {
         hud_.drawPause(r_);
     }
@@ -4343,7 +4413,7 @@ int App::driveTest() {
             float fx2 = 0, fz2 = 0;
             vehicle3d_.forward(fx2, fz2);
             const float lx2 = -fz2, lz2 = fx2;
-            const float hb = Vehicle::WHEELBASE * 0.5f, ht = Vehicle::TRACK * 0.5f;
+            const float hb = vehicle3d_.wheelbase() * 0.5f, ht = Vehicle::TRACK * 0.5f;
             const float wp[4][2] = {{vehicle3d_.x() + fx2 * hb, vehicle3d_.z() + fz2 * hb},
                                     {vehicle3d_.x() - fx2 * hb, vehicle3d_.z() - fz2 * hb},
                                     {vehicle3d_.x() + lx2 * ht, vehicle3d_.z() + lz2 * ht},

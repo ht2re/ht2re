@@ -66,7 +66,11 @@ public:
         // 25:06 / 25:12 readings for a fresh job).
         float timeLimit = 0;                      // seconds allowed
         float timeLeft = 0;                       // seconds remaining
-        bool illegal = false, mafia = false;      // carrier tags
+        // merchandise tags. trucks/fuel → truckOk, cars → carOk. The two
+        // class tags are exclusive in the shipped table; illegal/mafia are not
+        // a carrier class.
+        bool truckOk = false, carOk = false;
+        bool illegal = false, mafia = false;
         bool active = false, done = false;
     };
     struct Dealer {                // a bazaar trade stall (parking bay role 4)
@@ -127,6 +131,14 @@ public:
     const std::vector<Job>& jobs() const { return jobs_; }
     // Jobs whose pickup point is within `radius` of (x, z), nearest first.
     std::vector<size_t> jobsNear(float x, float z, float radius) const;
+    // Same order as jobsNear, keeping only cargo this vehicle's class can
+    // haul (lorry/tractor → trucks/fuel, car → cars). accept() itself stays
+    // unfiltered.
+    std::vector<size_t> jobsForPlayer(float x, float z, float radius) const;
+    bool canCarry(const Job& job) const;
+    // "car" / "lorry" / "tractor" / "semitrailer", or empty when the driven
+    // model is not in the catalogue.
+    std::string playerKlass() const;
     bool accept(size_t jobIndex);                 // one active job at a time
     // Replace the small progress subset stored by HT2RE-SAVE.
     void restoreProgress(size_t delivered, int activeJobIndex);

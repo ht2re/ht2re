@@ -152,6 +152,10 @@ public:
     void setCargoMass(float kg) { cargoMass_ = std::max(0.0f, kg); }
     float cargoMass() const { return cargoMass_; }
     float totalMass() const { return spec_.mass + cargoMass_; }
+    // Axle span used by the bicycle model.  Defaults to the ZIL measurement;
+    // App replaces it with the span of the loaded body's wheel meshes.
+    float wheelbase() const { return wheelbase_; }
+    void setWheelbase(float metres);
     float tankLitres() const { return tankLitres_; }
 
     // model constants (measured from the assembled mesh)
@@ -215,6 +219,7 @@ private:
     TechSpec spec_;
     bool haveSpec_ = false;
     float cargoMass_ = 0.0f;
+    float wheelbase_ = WHEELBASE;
     float tankLitres_ = 200.0f;
     float omega_ = 0.0f;        // engine angular velocity, rad/s
     int gear_ = 0;              // 0 = N, -1 = R, 1.. gearCount
