@@ -1659,9 +1659,8 @@ bool App::refuel(long* paidOut, float addFraction) {
 
 bool App::repair(long* paidOut) {
     if (nearestService(false) < 0) return false;
-    const float dmg = vehicle3d_.damage();
-    if (dmg < 0.02f) return false;
     const long cost = repairPrice();
+    if (cost <= 0) return false;
     if (economy_.money() < cost) return false;
     economy_.addMoney(-cost);
     vehicle3d_.repair();
@@ -1679,7 +1678,7 @@ long App::refuelPrice() const {
 }
 
 long App::repairPrice() const {
-    return (long)(vehicle3d_.damage() * 6000.0f);
+    return Vehicle::bodyRepairPrice(vehicle3d_.damage());
 }
 
 // ---------------------------------------------------------------------------

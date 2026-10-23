@@ -222,6 +222,15 @@ double Vehicle::stationPurchaseLitres(double tank, double fuelFraction,
     return litres;
 }
 
+long Vehicle::bodyRepairPrice(double condition) {
+    // 0x521bfd: fcom 0.01, and the multiply path runs only when the condition
+    // is greater than or equal to it. _ftol (0x61d830) truncates toward zero.
+    if (!(condition >= 0.01)) return 0;
+    const long one = (long)(condition * 5000.0);
+    if (one <= 0) return 0;
+    return one * 3;
+}
+
 void Vehicle::addFuel(float amount) {
     // `fuel_` is a 0..1 fraction of tankLitres_ (the HUD, the service screen and
     // the save file all work in fractions), so `amount` is a fraction top-up.

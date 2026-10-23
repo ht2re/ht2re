@@ -169,6 +169,14 @@ public:
     // `addFraction` < 0 means "the empty part" (the gasfull word, set to 100).
     static double stationPurchaseLitres(double tank, double fuelFraction,
                                         double money, double addFraction);
+    // Full body-repair bill. king.exe 0x555f30 writes one damage float into
+    // body channels 0, 1 and 2. The service open (0x521bcb) prices each with
+    // the matching virtual (+0x38 / +0x34 / +0x28): a value below the qword at
+    // 0x64b5a0 (0.01) is hidden, otherwise the price is _ftol(value * 5000)
+    // (qword 0x64b848) and the three integers are summed. Wheel rows read
+    // numtech (record +0x860), which is 0 on every drivable vehicle.
+    // `condition` is that shared channel value (Vehicle::damage).
+    static long bodyRepairPrice(double condition);
 
     // model constants (measured from the assembled mesh)
     static constexpr float RIDE_HEIGHT = 1.0f;   // wheel contact below y=0
