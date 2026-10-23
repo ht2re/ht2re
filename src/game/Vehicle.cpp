@@ -2,6 +2,7 @@
 #include "Collision.h"
 #include "../world/GroundMap.h"
 #include "../util/Log.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
@@ -181,6 +182,44 @@ void Vehicle::setWheelbase(float metres) {
     if (!(metres > 1.0f) || metres > 20.0f) return;
     if (std::fabs(metres - WHEELBASE) < 0.01f) metres = WHEELBASE;
     wheelbase_ = metres;
+}
+
+double Vehicle::stationLitrePrice(float x, float z, float height) {
+    auto dist = [](double px, double pz, double py, float x, float z, float h) {
+        const double dx = (double)x - px;
+        const double dz = (double)z - pz;
+        const double dy = (double)h - py;
+        return std::sqrt(dx * dx + dz * dz + dy * dy);
+    };
+    const double d = std::min(dist(-1720.0, 3950.0, 3.0, x, z, height),
+                              dist(-3000.0, -4715.0, 20.0, x, z, height));
+    // The same operations as 0x4332e0, including the cancelling +1/−1 around
+    // the multiply, so the truncation matches _ftol (0x61d830).
+    double v = d * 0.00025;
+    v = v + 1.0;
+    v = v * 20.0;
+    v = v + 1.0;
+    v = v - 1.0;
+    if (v < 0.0) v = 0.0;
+    const long n = (long)v;
+    return (double)n * 0.1;
+}
+
+double Vehicle::stationPurchaseLitres(double tank, double fuelFraction,
+                                      double money, double addFraction) {
+    if (!(tank > 0.0)) return 0.0;
+    const double empty = tank * std::max(0.0, 1.0 - fuelFraction);
+    double litres = addFraction < 0.0
+                        ? empty
+                        : std::min(empty, std::max(0.0, addFraction) * tank);
+    // 0x520d74 compares 2*litres with the player's money and, when the purchase
+    // would exceed money at $2/l, rewrites it to money/2 − 1.
+    if (2.0 * litres > money) {
+        litres = money * 0.5 - 1.0;
+        if (litres < 0.0) litres = 0.0;
+        if (litres > empty) litres = empty;
+    }
+    return litres;
 }
 
 void Vehicle::addFuel(float amount) {

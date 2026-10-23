@@ -943,6 +943,8 @@ void EscMenu::refresh() {
     if (c.refuelCost >= 0) d.refuelCost = c.refuelCost;
     if (c.repairCost >= 0) d.repairCost = c.repairCost;
     if (c.fuelPerLitre >= 0) d.fuelPrice = c.fuelPerLitre;
+    if (c.fuelUnit >= 0.0) d.fuelUnit = c.fuelUnit;
+    if (c.tankLitres > 0.0f) d.tankLitres = c.tankLitres;
     if (c.gameData) d.upgPrice = c.gameData->upgrades;
     // the highlighted line of the ПРОДАЁТСЯ list is what the panel shows and what
     // the "buyvehicle" action buys
@@ -1019,17 +1021,35 @@ std::string EscMenu::field(const std::string& key) const {
         return buf;
     }
     if (key == "fuel.liters") {
-        snprintf(buf, sizeof buf, "%d", (int)(d.fuel * kTankLitres + 0.5f));
+        const float tank = d.tankLitres > 0.0f ? d.tankLitres : kTankLitres;
+        const double litres = (double)d.fuel * (double)tank;
+        if (d.fuelUnit >= 0.0) snprintf(buf, sizeof buf, "%.1f", litres);
+        else snprintf(buf, sizeof buf, "%d", (int)(litres + 0.5));
         return buf;
     }
     if (key == "fuel.price") {
+        if (d.fuelUnit >= 0.0) {
+            snprintf(buf, sizeof buf, "%.1f", d.fuelUnit);
+            return buf;
+        }
         if (d.fuelPrice < 0) return "-";
         snprintf(buf, sizeof buf, "%ld", d.fuelPrice);
         return buf;
     }
-    if (key == "fuel.buy.liters" || key == "fuel.buy.cost") {
+    if (key == "fuel.buy.liters" || key == "fuel.buy.cost" ||
+        ((key == "fuel.cost" || key == "price.fuel") && d.fuelUnit >= 0.0)) {
         const Slider* sl = slider("fuel-amount");
         const float amt = sl ? sl->value : 0.0f;
+        if (d.fuelUnit >= 0.0) {
+            const float tank = d.tankLitres > 0.0f ? d.tankLitres : kTankLitres;
+            const double litres = Vehicle::stationPurchaseLitres(
+                tank, d.fuel, (double)d.money, amt);
+            if (key == "fuel.buy.liters") {
+                snprintf(buf, sizeof buf, "%.1f", litres);
+                return buf;
+            }
+            return fmtMoney((long)std::llround(d.fuelUnit * litres));
+        }
         const long perL = d.fuelPrice < 0 ? 0 : d.fuelPrice;
         if (key == "fuel.buy.liters") {
             snprintf(buf, sizeof buf, "%d", (int)(amt * kTankLitres + 0.5f));

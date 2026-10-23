@@ -133,7 +133,9 @@ public:
         float clockHours = 9.0f;          // App::timeOfDay_
         long refuelCost = -1;             // App's own pricing, -1 = unknown
         long repairCost = -1;
-        long fuelPerLitre = -1;           // App's price per litre, -1 = unknown
+        long fuelPerLitre = -1;           // integer price, -1 = unknown (demo uses 9)
+        double fuelUnit = -1;             // king.exe per-litre price, -1 = use fuelPerLitre
+        float tankLitres = -1;            // the driven vehicle's tank, -1 = the demo 200 l
         std::string driverName;            // currently hired driver, empty = player
         std::string slotText;             // App::saveSummary()
         std::string notice;               // a transient message on the panel
@@ -262,6 +264,8 @@ private:
         std::string vehicle, road, driver, slot, station;
         size_t jobsTotal = 0, jobsNear = 0, upgrades = 0, offers = 0, delivered = 0;
         long refuelCost = -1, repairCost = -1, fuelPrice = -1;
+        double fuelUnit = -1;
+        float tankLitres = -1;
         bool hasJob = false;
         std::string jobCargo, jobFrom, jobTo;
         long jobReward = 0;

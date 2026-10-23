@@ -346,7 +346,9 @@ private:
     std::vector<ServiceStop> serviceStops_;
     void initServices();
     int nearestService(bool wantFuel) const;
-    bool refuel(long* paidOut);
+    // addFraction < 0 fills the empty part of the tank (gasfull = 100).
+    // A 0..1 value is the fraction of the tank the fuel slider is adding.
+    bool refuel(long* paidOut, float addFraction = -1.0f);
     bool repair(long* paidOut);
     long refuelPrice() const;
     long repairPrice() const;

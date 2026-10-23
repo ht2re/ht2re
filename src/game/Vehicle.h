@@ -158,6 +158,18 @@ public:
     void setWheelbase(float metres);
     float tankLitres() const { return tankLitres_; }
 
+    // Station price per litre. king.exe 0x433240 takes the 3D distance from
+    // the vehicle (x, horizontal, height) to the nearer of (-1720, 3950, 3)
+    // and (-3000, -4715, 20); 0x4332e0 then does
+    // trunc(20 + dist * 0.005) * 0.1. The result is never below 2.0.
+    static double stationLitrePrice(float x, float z, float height);
+    // Litres a pay press buys. king.exe 0x520d22:
+    //   requested = (slider as a fraction of the tank), capped at the empty part
+    //   if 2 * requested > money: requested = money / 2 - 1
+    // `addFraction` < 0 means "the empty part" (the gasfull word, set to 100).
+    static double stationPurchaseLitres(double tank, double fuelFraction,
+                                        double money, double addFraction);
+
     // model constants (measured from the assembled mesh)
     static constexpr float RIDE_HEIGHT = 1.0f;   // wheel contact below y=0
     static constexpr float WHEELBASE = 7.9f;     // front +2.10 .. rear -5.80

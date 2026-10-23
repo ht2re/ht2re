@@ -1642,14 +1642,17 @@ int App::nearestService(bool wantFuel) const {
     return best;
 }
 
-bool App::refuel(long* paidOut) {
+bool App::refuel(long* paidOut, float addFraction) {
     if (nearestService(true) < 0) return false;
-    const float need = 1.0f - vehicle3d_.fuel();
-    if (need < 0.03f) return false;
-    const long cost = refuelPrice();
-    if (economy_.money() < cost) return false;
+    const double price = Vehicle::stationLitrePrice(vehicle3d_.x(), vehicle3d_.z(),
+                                                    vehicle3d_.y());
+    const double litres = Vehicle::stationPurchaseLitres(
+        vehicle3d_.tankLitres(), vehicle3d_.fuel(), (double)economy_.money(), addFraction);
+    if (litres <= 0.0) return false;
+    const long cost = (long)std::llround(price * litres);
     economy_.addMoney(-cost);
-    vehicle3d_.setFuel(1.0f);
+    const double tank = vehicle3d_.tankLitres();
+    vehicle3d_.setFuel((float)(vehicle3d_.fuel() + litres / tank));
     if (paidOut) *paidOut = cost;
     return true;
 }
@@ -1667,8 +1670,12 @@ bool App::repair(long* paidOut) {
 }
 
 long App::refuelPrice() const {
-    const float need = 1.0f - vehicle3d_.fuel();
-    return need <= 0.0f ? 0 : (long)(need * 1800.0f);
+    const double price = Vehicle::stationLitrePrice(vehicle3d_.x(), vehicle3d_.z(),
+                                                    vehicle3d_.y());
+    const double litres = Vehicle::stationPurchaseLitres(
+        vehicle3d_.tankLitres(), vehicle3d_.fuel(), (double)economy_.money(), -1.0);
+    if (litres <= 0.0) return 0;
+    return (long)std::llround(price * litres);
 }
 
 long App::repairPrice() const {
@@ -2281,7 +2288,9 @@ void App::escAction(const std::string& act) {
 
     long paid = 0;
     if (act == "refuel") {
-        if (refuel(&paid)) {
+        // The slider is the fraction of the tank to add. Opening the panel sets
+        // it to the empty part, which is the gasfull word (100) then pay.
+        if (refuel(&paid, esc_.sliderValue("fuel-amount"))) {
             LOG("ui: refuelled for %ld, fuel %.2f, money %ld", paid,
                 vehicle3d_.fuel(), economy_.money());
             input_.rumble(0.3f, 0.15f, 120);
@@ -2392,7 +2401,8 @@ void App::syncEscContext() {
     uc.clockHours = timeOfDay_;
     uc.refuelCost = refuelPrice();
     uc.repairCost = repairPrice();
-    uc.fuelPerLitre = 9;
+    uc.fuelUnit = Vehicle::stationLitrePrice(vehicle3d_.x(), vehicle3d_.z(), vehicle3d_.y());
+    uc.tankLitres = vehicle3d_.tankLitres();
     uc.driverName = hiredDriver_;
     uc.slotText = saveSummary();
     esc_.setContext(uc);
