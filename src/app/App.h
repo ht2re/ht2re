@@ -361,6 +361,21 @@ private:
     // Renderer batches of the intact and the dented skin, one entry per AI model
     // (equal when the container has no damaged material at all).
     std::vector<int> trafficIntact_, trafficDamaged_;
+    // Rendered tyres, split out of the baked body so they can steer and spin.
+    // Pivot is b3d (x, z, height).  steer is the front axle.
+    struct WheelVis {
+        int batch = -1;
+        float pivot[3] = {0, 0, 0};
+        bool steer = false;
+    };
+    std::vector<WheelVis> playerWheels_;
+    std::vector<std::vector<WheelVis>> trafficWheels_;
+    std::vector<WheelVis> packWheels(const std::vector<B3D::SubMesh>& all,
+                                     std::vector<B3D::SubMesh>* body);
+    void bindPlayerWheels();
+    void drawWheelVis(const std::vector<WheelVis>& wheels, const Mat4& body,
+                      float spinRad, float steerDeg);
+    void drawPlayerWheels(float cx, float cy, float cz, float yaw, float pitch);
     // Car::damage at which the dented skin is drawn.
     static constexpr float kDamageSkin = 0.35f;
     int playerVisualState_ = 0;

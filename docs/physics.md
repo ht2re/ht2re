@@ -51,22 +51,28 @@ table directly.
 Offsets marked **[reader]** are the destination of the `fcn.00603d30` key read
 (`GetPrivateProfileStringA` + `atof`, `0x603d30`) for the legacy text `.tch`
 format, anchored on the mass destination at `0x50879d`
-(`add edx, 0xffffffa0` with `edx = record+0xc0` → `record+0x60`) and validated
-by the 43 shipped records.
+(`add edx, 0xffffffa0` with `edx = record+0xc0` → `record+0`, and that pointer
+is overwritten by the basis copy at `0x509030`). The mass the fuel seed
+actually loads is `[ebx+0x60]` at `0x508aa6`, which is the shipped file field.
 
 | offset | key | shipped values (43 records) | evidence |
 |--------|-----|------------------------------|----------|
 | `+0x060` | `mass` | 715..12000 kg, scales with class | `0x50879d` |
 | `+0x064` | `rwheel` | 0.292..0.711 m | `0x5087fa` |
 | `+0x068` | `rwheel1` | 0.170..0.711 m | `0x50881c` |
-| `+0x06c` | `horse_power` | 30..600 hp, scales with class | value semantics; key read at `0x509105` |
+| `+0x06c` | `tank` | 30..600 l; equals `+0xa0 * +0xa8` when fuelConsumption > 0 | dest `ebx+0x6c` at `0x508b0b` (second `tank` read). Not horse_power |
 | `+0x0ac` | `air_press_coeff` | 0.3 everywhere (loader default 0.3) | `0x50888a` |
 | `+0x0b0` | `air_resist_coeff` | 0.3 everywhere (default 0.3) | `0x5088ac` |
 | `+0x0b4` | `air_side_resist_coeff` | 0.8 everywhere (default 0.8) | `0x5088d5` |
 | `+0x0b8` | `front_wheel_thickness` | 0.15..0.4 | `0x50883e` |
 | `+0x0bc` | `rear_wheel_thickness` | 0.2..0.8 | `0x508863` |
 | `+0x0c0` | `maxrotmomentum` | 65..2400, ∝ power | `0x5087bd` |
-| `+0x0c8` | price-like (cars 16000..30000, lorries 36000, tractors 40000) | `0x509121` reads `price` into a *different* template | value semantics only |
+| `+0x0a0` | `fuelConsumption` | mass·0.001 on powered records (ZIL 5.1) | `ebx+0xa0` at `0x508aaf`; seed `mass * dword 0x64dac8` (0.001), then `/ FuelScale` |
+| `+0x0a8` | `kilometrage` | 50 on lorries; cars vary | `ebx+0xa8` at `0x508a82`, default 50 |
+| `+0x0c8` | `breakpower` | 16000..40000 in the shipped file; ini default 5872 | dest `esi+8` at `0x5087d8` (`esi` = record+0xc0). Not the price |
+| `+0x11c` | `body_square` | 1.6..31.6 m² (ZIL 19.9, BMW 2.0, STORM 26) | `ebx+0x11c` at `0x5098bf` |
+| `+0x7c4` | `horse_power` | int, default 150; authored on some lorries (SCANIA 360, STORM 700) | `ebx+0x7c4` at `0x5090f3` via `0x603b70`. No other `/ai 0x7c4` hit |
+| `+0x7c8` | `price` | int, default 10000; authored prices on some lorries | `ebx+0x7c8` at `0x509116` |
 | `+0x0cc` | `rear_axle_coeff` | 3.08..15.72 (default 5.0) | `0x50891a` |
 | `+0x0d0` | `reverse_trans_coeff` | −3.06..−14 (default −4.0) | `0x50893e` |
 | `+0x0d8 + 4k` | `gear_trans_coeff(k+1)`, k = 0..12 | see 1.2 | `0x50897d` |
@@ -139,8 +145,8 @@ I_engine      = maxrotmomentum / omegaMaxPower                ; kg m^2
   ~36 t against 5.1 t in top.
 * **Resistances.** rolling `c_rr * m * g` with `c_rr = 0.006` on a road
   (`GroundMap::onRoad`) and `0.035` off it; aero `0.5 * rho * C_d * A * v^2`
-  with `rho = 1.2`, `C_d = air_resist_coeff` and the frontal-area proxy
-  `A = 0.6 * m/1000 + 2.0 m^2`.
+  with `rho = 1.2`, `C_d = air_resist_coeff` and `A = body_square` (`+0x11c`,
+  §3.3). The proxy `0.6 * m/1000 + 2.0` is only the fallback for a non-positive area.
 * **Brakes.** `0.50 g` on the pedal (converter unlocked, so the engine inertia
   does not fight the brakes) and `0.75 g` on the handbrake.  See §3.2.
 * **Steering.** Bicycle model `yawRate = v * tan(lock) / WHEELBASE` with the
@@ -180,19 +186,29 @@ from the dashboard: the recovered 5-speed shifts at 10.2 / 18.5 / 33.2 / 51.7 /
 76.0 km/h against the old table's 12 / 24 / 38 / 54 / 72 km/h.
 
 ### 3.2 Braking 0.5 g
-`king.exe` reads a `breakpower` key (`0x67505c`, read at `0x5087e9`, default
-`0x40b7700000000000 = 5872.0`), but no offset in the binary record could be
-matched to it: a scan of all 43 records for a positive field in a brake-force
-range that correlates with mass (`r > 0.9`) returns only `mass` itself, and the
-`0x509xxx` reader writes it into a template that is *not* the 2416-byte record.
-`0.5 g` is the standard laden heavy-vehicle figure.
+`breakpower` is stored at record `+0xc8` (`lea eax,[esi+8]` at `0x5087d8`,
+`esi = 0x697928 = record+0xc0`; ini default 5872, shipped ZIL float 36000).
+`36000 / (5100·9.81) ≈ 0.72 g` for the ZIL, but the same division is 2.8 g on
+the FIAT and 0.3 g on the STORM, so the float is not a force in newtons and
+not a deceleration in g. No use of displacement `0x2010` (`object+0x1f48+0xc8`)
+was found, and the `[reg+0xc8]` hits in `0x4f7a00` are a 3-vector, not this
+field. The port still brakes at 0.5 g.
 
-### 3.3 Frontal-area proxy
-The `.tech` format has a `body_square` key, but its offset could not be pinned
-either.  `A = 0.6 * m/1000 + 2.0` gives 2.9 m² for the 1500 kg GAZELLE and
-9.2 m² for the 12 t STORM.  Aero drag is a small term at these speeds (≈570 N
-for the ZIL at 25 m/s against 187 kW available), so the top speed stays
-gear-limited, as the closed form in §2.1 says it must.
+### 3.3 Frontal area — recovered
+`body_square` is record `+0x11c` (`lea ecx,[ebx+0x11c]` at `0x5098bf`).
+Shipped values: GAZELLE 4.0 m², ZIL 19.9 m², BMW_M5 2.0 m², STORM 26 m².
+The port's aero term uses that area. The mass proxy
+`A = 0.6·m/1000+2` remains only when the field is ≤ 0.05. Top speed is still
+the gear redline of §2.1; the larger area changes coast-down, not the clamp.
+
+### 3.4 Tank — recovered
+The second `tank` read (`0x508b0b`) stores at `ebx+0x6c`. On every powered
+record the file satisfies `+0x6c = +0xa0 · +0xa8` (the multiply at `0x508af4`).
+ZIL is 5.1·50 = 255 l, FIAT 30 l, STORM 600 l. The port's `mass/25` clamped
+to 40..400 l is gone. `horse_power` is the int at `+0x7c4` (`0x5090f3`,
+default 150). Nothing else in `.text` uses immediate `0x7c4`, and `king.exe`
+contains no 735.5 W/hp constant, so the port's `P = powerHp·735.5` still
+reads the `+0x6c` float it was calibrated against. That float is the tank.
 
 ---
 
@@ -245,14 +261,31 @@ mass, power, gearing and aero did not exist.
 
 ## 6. What the exe still could not answer
 
-* `breakpower` and `body_square` record offsets (§3.2, §3.3).
-* `fuelConsumption` / `fuelTimeEndurance` / `tank` / `FuelScale` offsets: the
-  keys are read at `0x508ad3`, `0x508a2f`, `0x508a08` and the defaults are
-  known, but the destinations are relative to a template that is not the record,
-  so the burn rate stays the historic port formula.
-* `driving_wheels` / `steering_wheels` / `touching_road_wheels`
-  (`0x508fad`, `0x50901c`, `0x508fcb`) would give the driven-axle share exactly;
-  the offset could not be pinned, so `0.55` is used.
+* How `breakpower` (`+0xc8`) becomes a deceleration (§3.2). The offset is known;
+  the force law is not, so 0.5 g stays.
+* The per-frame fuel load. Litres per tick are `tank·arg/fuelTimeEndurance`,
+  with `arg = sample(+0x3fc0) · |+0x1c84| · +0x29d8 / tach · dt`. `+0x29d8`
+  copies `+0x270c`, and `0x4d629d` sets that to
+  `(R − L) · 0.2 · Q`. `L` is the length stored at `+0xdc4` (`0x5ab4d0` of
+  the vector built from `+0x40` and the `+0xd0` axis). `Q` is the `0x4ff660`
+  torque ratio, or 1.   The remaining unknown is `R`, the return of `0x4d4700`. Its qword
+  `[ebp+0x10]` is the local `[esp+0x48]` of `SecondCar::run` (`0x4d6516`,
+  dot product at `0x4d6d6c`), not the `+0x4074` fields and not `0x4ff5e0`.
+  That is not throttle, speed, rpm or gear. The port still burns
+  `(0.08+0.22·|throttle|)·(0.4+km/h/90)` litres/s against a 300 l reference.
+* Which float feeds engine torque. `0x507380` is
+  `exp(−(|a′−tach|/tach)⁴) · sample(+0x3ebc)/sample(+0x3fc0)`, times
+  `sqrt(sin(a/tach·π/2))` and `(a/tach)^0.2` when `a < tach`. The `+0x3ebc`
+  points are `maxrotmomentum` scaled by 0.15, 1, 0.25 and 1.4, and its
+  parameter `t` steps by 0.5 when `_ftol` at `0x50132b` is 2 and by 0.8 when
+  it is 3. On the tick, `a` is the return of `0x4ff150` (wheel rev/s), not tach.
+  `powerW = powerHp * 735.5` stays, and `powerHp` is still the `+0x6c` float.
+  The port's shift thresholds (0.96, 0.45, 0.30 s, 0.25 s) are not the gear
+  search at `0x507550`.
+* How `driving_wheels` becomes an axle fraction. Address `0x697994` and the
+  constructor slot `esp+0x374` have no readers, so `kDriveShare` stays 0.55.
+* Where 1.25 would be a redline. The float at `0x64c460` scales a colour
+  (`0x4bebe3`), and `0x64f754` scales a time lerp (`0x54beb5`).
 * `suspension` (`0x508ea2`) and `body_height` (`0x5097ee`): not needed by the
   current model.
 * `TRUCK.INI [CAR]` (`friction_coeff=1.4`, `steering_sence=0.5`,

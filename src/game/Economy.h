@@ -160,6 +160,9 @@ public:
     const std::vector<TerminalWindow>& windows() const { return windows_; }
     // The window the truck is standing at, or a default (valid == false).
     TerminalWindow terminalAt(float x, float z) const;
+    // The use key posts the current windows. tick() still waits out the 20 s
+    // warmup before it calls the same refill on its own clock.
+    void postOffers() { rotateOffers(); }
     // Offers currently hanging on pickup windows (the Справка list).
     std::vector<int> postedJobs() const;
     bool canCarry(const Job& job) const;

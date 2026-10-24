@@ -71,6 +71,15 @@ public:
         // means "always drawn".
         std::string group;
         int damageState = -1, tyreState = -1; // selected vehicle alternatives; -1 = raw scene
+        // 0 = body. 1 = front axle (steer + spin). 2 = other axle (spin only).
+        // Set when a subtag-18 link places a *wheel* container (Zilwheel0, …).
+        // The pivot is that anchor's translation in the parent frame, b3d (x, z, h).
+        int wheelRole = 0;
+        float wheelPivot[3] = {0, 0, 0};
+        // ENV tile stem the material's texture was loaded from ("" = global).
+        // king.exe keys a texture by its own .res; a shared stem such as Zgas.txr
+        // is a different image per tile (docs/txr_alpha.md §3 caveat 3).
+        std::string texTile;
         uint32_t materialIndex = 0;
         float center[3] = {0, 0, 0};
         float radius = 0;

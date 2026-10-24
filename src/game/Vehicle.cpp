@@ -46,6 +46,12 @@ float recF(const std::vector<char>& r, size_t off) {
     return v;
 }
 
+int recI(const std::vector<char>& r, size_t off) {
+    int v = 0;
+    if (off + 4 <= r.size()) std::memcpy(&v, r.data() + off, 4);
+    return v;
+}
+
 // A gear coefficient that the record does not author is auto-filled by king.exe
 // as `previous * 5/7` (0x5089b7 with the double 5/7 at 0x64dae8, reached when
 // the value is below 0x64daf0).  The first such step is the end of the real
@@ -96,11 +102,17 @@ std::vector<Vehicle::TechSpec> loadTech() {
         s.wheelRadius = recF(r, 0x64);
         s.wheelRadiusRear = recF(r, 0x68);
         s.powerHp = recF(r, 0x6c);
+        s.tankLitres = recF(r, 0x6c);
+        s.fuelPerKm = recF(r, 0xa0);
+        s.rangeKm = recF(r, 0xa8);
         s.airPress = recF(r, 0xac);
         s.airResist = recF(r, 0xb0);
         s.airSide = recF(r, 0xb4);
         s.maxRotMomentum = recF(r, 0xc0);
-        s.price = recF(r, 0xc8);
+        s.breakPower = recF(r, 0xc8);
+        s.bodySquare = recF(r, 0x11c);
+        s.horsePower = recI(r, 0x7c4);
+        s.techPrice = recI(r, 0x7c8);
         s.rearAxle = recF(r, 0xcc);
         s.reverseCoeff = recF(r, 0xd0);
         for (int i = 0; i < 13; ++i) s.gears[i] = recF(r, 0xd8 + 4 * (size_t)i);
@@ -164,13 +176,19 @@ void Vehicle::useVehicle(const std::string& sectionOrDisplay) {
     }
 }
 
+float Vehicle::frontalArea(float bodySquare, float mass) {
+    if (bodySquare > 0.05f) return bodySquare;
+    return 0.6f * mass / 1000.0f + 2.0f;
+}
+
 void Vehicle::applySpec(const TechSpec& s) {
     spec_ = s;
     haveSpec_ = true;
-    // A lorry tank is ~200 l and a car ~50; the shipped record does not carry
-    // the tank key that the .tch text format reads (king.exe 0x508a08) at a
-    // location we could pin, so it is derived from the mass.
-    tankLitres_ = std::min(400.0f, std::max(40.0f, s.mass / 25.0f));
+    // king.exe 0x508b0b writes the "tank" key at record+0x6c. The old mass/25
+    // clamp (40..400 l) contradicts the table: FIAT is 30 l, ZIL is 255 l,
+    // STORM is 600 l.
+    if (s.tankLitres > 1.0f) tankLitres_ = s.tankLitres;
+    else tankLitres_ = std::min(400.0f, std::max(40.0f, s.mass / 25.0f));
     omega_ = 0.0f;
     gear_ = 0;
 }
@@ -319,10 +337,10 @@ void Vehicle::forward(float& fx, float& fz) const {
     fz = cosf(a);
 }
 
-// Automatic gearbox.  Up-shifts just under the redline, down-shifts when the
-// engine would bog, and kick-downs under full throttle - the original's HUD
-// shows the resulting gear (the port's own tachometer is scaled 0..2500 rpm
-// with the redline at 2000, src/app/App.cpp drawGauge).
+// Automatic gearbox. Up-shifts just under the redline, down-shifts when the
+// engine would bog, and kick-downs under full throttle. king.exe searches
+// gears in 0x507710 → 0x507550 (ratio against tach*0.5); that is not these
+// 0.96 / 0.45 thresholds or the 0.30 s / 0.25 s delays, so they stay.
 void Vehicle::autoGear(float dt, float throttle) {
     shiftTimer_ = std::max(0.0f, shiftTimer_ - dt);
     const float omegaRed = 2.0f * PI * spec_.tachMaxPower * kRedlineRatio;
@@ -385,13 +403,20 @@ void Vehicle::update(const Input& in, float dt) {
     load_ = std::min(1.0f, std::fabs(in.throttle));
     steerCmd_ = in.steer;
 
-    // --- fuel burn: the tank scaled by the engine's own consumption curve ----
+    // Fuel fraction. king.exe decreases t on the curve at vehicle+0x3ef0
+    // (0x500612..0x500641 → 0x4eb6e0) by
+    //   dt * sample(+0x3fc0) * |+0x1c84| * +0x29d8 / tach / fuelTimeEndurance.
+    // Litres on segment 0 are tank*t (0x4eb5e0, point built at 0x4ecd03).
+    // +0x1c84 is the 0.7 s cosine window at +0x1b50 (ctor 0x4ec3c4, kernel
+    // 0x4eab02, read 0x4eaf98), fed by the target in 0x4ff210..0x4ff391.
+    // +0x29d8 copies +0x270c (0x4ffbbd). +0x270c at 0x4d629d is
+    // (return of 0x4d4700 − length at +0xdc4) * 0.2 * return of 0x4ff660.
+    // 0x4d4700's qword [ebp+0x10] is the [esp+0x48] local of SecondCar::run
+    // (dot product at 0x4d6d6c), not throttle, speed, rpm or gear. The
+    // expression below and the 300 l divisor stay.
     {
         float kmh = speedKmh();
         float litresPerSec = (0.08f + 0.22f * std::fabs(in.throttle)) * (0.4f + kmh / 90.0f);
-        // fuel_ stays a 0..1 fraction of the tank (the HUD, the service screen
-        // and the save file all work in fractions); the 300 l reference is the
-        // historical burn rate and is what the save-file round trip pins.
         fuel_ = std::max(0.0f, fuel_ - litresPerSec * dt / 300.0f);
     }
 
@@ -428,9 +453,10 @@ void Vehicle::update(const Input& in, float dt) {
         if (offroad) crr = kOffroadCrr;
     }
     float fRoll = -dir * mass * GRAV * crr;
-    // Frontal-area proxy from the mass (the record's own body_square key was not
-    // located): 2.9 m^2 for a 1500 kg car .. 9.2 m^2 for a 12 t lorry.
-    float area = 0.6f * mass / 1000.0f + 2.0f;
+    // body_square is record+0x11c (king.exe 0x5098bf). The mass proxy remains
+    // only when a record did not ship a positive area. Cargo mass does not
+    // change the authored frontal area, so the lookup uses the curb mass.
+    float area = frontalArea(spec_.bodySquare, spec_.mass);
     float fAir = -dir * 0.5f * 1.2f * std::max(0.05f, spec_.airResist) * area * speed_ * speed_;
     float fBrake = 0.0f;
     if (in.throttle < -0.01f && speed_ > 0.1f) {

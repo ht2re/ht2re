@@ -611,7 +611,8 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked, int 
         }
 
         void go(const Node& n, int curMesh, const XForm& xf, int depth,
-                const std::string& group = std::string(), int body = -1, int tyre = -1) {
+                const std::string& group = std::string(), int body = -1, int tyre = -1,
+                bool wheel = false, const float* pivot = nullptr) {
             // a subtag-21 record is a "key" node: everything below it can be
             // toggled by the scripts (people by day, roadworks, floods, ...)
             const std::string grp = (n.subtag == 21 && !n.name.empty()) ? n.name : group;
@@ -622,7 +623,7 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked, int 
                     const bool wheel = n.name.find("Wheel") != std::string::npos;
                     const int state = wheel ? 0 : std::min(selectedBody, (int)n.kids.size() - 1);
                     go(n.kids[(size_t)state], curMesh, xf, depth, grp,
-                       wheel ? body : state, wheel ? state : tyre);
+                       wheel ? body : state, wheel ? state : tyre, wheel, pivot);
                     return;
                 }
                 // These children are alternative LODs, not cumulative parts.
@@ -634,7 +635,7 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked, int 
                             const float distance = bitsToFloat(child.params[7]);
                             if (distance < nearest) { nearest = distance; lod = &child; }
                         }
-                    if (lod) { go(*lod, curMesh, xf, depth, grp, body, tyre); return; }
+                    if (lod) { go(*lod, curMesh, xf, depth, grp, body, tyre, wheel, pivot); return; }
                 }
             }
             if (!n.name.empty() && skipLinked && depth == 0 && isLinkedTarget(n.name))
@@ -642,7 +643,8 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked, int 
             if (n.name.rfind("hit_", 0) == 0 && depth == 0)
                 return;                                   // collision-only geometry
             if (n.meshIndex >= 0) curMesh = n.meshIndex;
-            if (n.faceIndex >= 0 && curMesh >= 0) emit(curMesh, n.faceIndex, n.name, xf, grp, body, tyre);
+            if (n.faceIndex >= 0 && curMesh >= 0)
+                emit(curMesh, n.faceIndex, n.name, xf, grp, body, tyre, wheel, pivot);
 
             if (n.subtag == 18 && n.params.size() >= 20) {
                 // "link": include the named container.  With an anchor name it is
@@ -682,18 +684,45 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked, int 
                         if (!seen) self->usedAnchors.push_back(from);
                     }
                     ++instances;
-                    go(*ib->second, -1, comb, depth + 1, grp, body, tyre);
+                    // A wheel container is authored around its own origin and
+                    // placed by the anchor.  The rendered node has to spin and
+                    // steer about that pivot; baking it into the body leaves
+                    // the tyre frozen (ZilWheel0Space and the rest of the
+                    // *Wheel*Space links in TRUCKS.B3D).
+                    bool childWheel = wheel;
+                    const float* childPivot = pivot;
+                    float placed[3];
+                    auto has = [](const std::string& s, const char* k) {
+                        for (size_t i = 0; s[i] && k[0]; ) {
+                            size_t j = 0;
+                            while (k[j] && s[i + j] &&
+                                   (s[i + j] | 32) == (k[j] | 32)) ++j;
+                            if (!k[j]) return true;
+                            ++i;
+                        }
+                        return false;
+                    };
+                    if (has(to, "wheel") && !has(to, "arc")) {
+                        childWheel = true;
+                        placed[0] = comb.t[0];
+                        placed[1] = comb.t[1];
+                        placed[2] = comb.t[2];
+                        childPivot = placed;
+                    }
+                    go(*ib->second, -1, comb, depth + 1, grp, body, tyre,
+                       childWheel, childPivot);
                 }
                 return;
             }
             for (auto& k : n.kids) {
                 if (selectedBody >= 0 && n.subtag == 10 && k.subtag == 10) continue;
-                go(k, curMesh, xf, depth, grp, body, tyre);
+                go(k, curMesh, xf, depth, grp, body, tyre, wheel, pivot);
             }
         }
 
         void emit(int mi, int fi, const std::string& nodeName, const XForm& xf,
-                  const std::string& group, int body, int tyre) {
+                  const std::string& group, int body, int tyre,
+                  bool wheel, const float* pivot) {
             Mesh& m = self->meshList[mi];
             const Face& f = self->faceList[fi];
             std::vector<uint32_t> mats;
@@ -708,6 +737,12 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked, int 
                 sm.group = group;
                 sm.damageState = body;
                 sm.tyreState = tyre;
+                if (wheel && pivot) {
+                    sm.wheelRole = 2;
+                    sm.wheelPivot[0] = pivot[0];
+                    sm.wheelPivot[1] = pivot[1];
+                    sm.wheelPivot[2] = pivot[2];
+                }
                 sm.materialIndex = mat;
                 if (mat < self->nameTable.size()) sm.material = self->nameTable[mat];
                 std::vector<uint32_t> remap((size_t)m.vcount, 0xFFFFFFFFu);
@@ -776,12 +811,17 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked, int 
         int coarse = 0;
         for (size_t b = 0; b < subs.size(); ++b) {
             const SubMesh& B = subs[b];
-            if (B.material.empty() || B.idx.size() < 3) continue;
+            if (B.material.empty() || B.idx.size() < 3 || B.wheelRole) continue;
             for (size_t a = 0; a < subs.size(); ++a) {
                 if (a == b || drop[a]) continue;
                 const SubMesh& A = subs[a];
                 if (A.material != B.material || A.group != B.group) continue;
-                if (A.idx.size() < B.idx.size() * 2) continue;
+                // A second copy with about the same triangle count still
+                // z-fights; the 2x test only caught a coarse LOD over a dense
+                // mesh.  Equal copies are the ones that shimmer on a slope.
+                if (A.idx.size() < B.idx.size()) continue;
+                const bool muchCoarser = A.idx.size() >= B.idx.size() * 2;
+                const float yTol = muchCoarser ? 0.5f : 0.08f;
                 float dx = A.center[0] - B.center[0];
                 float dz = A.center[1] - B.center[1];
                 float dy = A.center[2] - B.center[2];
@@ -821,7 +861,7 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked, int 
                         const float u = 1.0f - v - w;
                         if (u < -1e-3f || v < -1e-3f || w < -1e-3f) continue;
                         const float py = u * ay + v * by + w * cy;
-                        if (std::fabs(py - qy) < 0.5f) { ++hits; break; }
+                        if (std::fabs(py - qy) < yTol) { ++hits; break; }
                     }
                 }
                 if (samples < 1 || hits * 4 < samples * 3) continue;
@@ -845,6 +885,25 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked, int 
                 hist += kv.first + ":" + std::to_string(kv.second);
             }
             LOG("b3d: %d coarse covers dropped (%s)", coarse, hist.c_str());
+        }
+    }
+    // Front axle: the wheel pivots with the greatest longitudinal z (b3d
+    // component 1).  ZilWheel0/1 sit at z = 2.10, the rear axle at z = -2.20,
+    // the cab (ZilBoothSpace) at z = 3.26, so +z is the nose.
+    {
+        float frontZ = -1.0e30f;
+        int nWheel = 0;
+        for (const SubMesh& sm : subs)
+            if (sm.wheelRole) { frontZ = std::max(frontZ, sm.wheelPivot[1]); ++nWheel; }
+        int nFront = 0;
+        if (nWheel) {
+            for (SubMesh& sm : subs)
+                if (sm.wheelRole && sm.wheelPivot[1] >= frontZ - 0.75f) {
+                    sm.wheelRole = 1;
+                    ++nFront;
+                }
+            LOG("b3d: %d wheel parts, %d on the front axle (pivot z %.2f)",
+                nWheel, nFront, frontZ);
         }
     }
     collectHitProxies();

@@ -26,20 +26,51 @@ class GroundMap;
 // `runtime object offset 0x1f48 + X`.  Record fields used here (see
 // docs/physics.md for the full address list):
 //
-//   +0x060  mass                 [kg]        (key "mass",   king.exe 0x50a9c5)
-//   +0x064  wheel radius         [m]         (key "rwheel", king.exe 0x50885f)
-//   +0x068  rear wheel radius    [m]         (key "rwheel1")
-//   +0x06c  engine power         [hp]        (key "horse_power", 0x509105)
+//   +0x060  mass                 [kg]        The fuel seed reads [ebx+0x60]
+//           (0x508aa6, mass * dword 0x64dac8). The "mass" key pointer at
+//           0x50879d is record+0 and is overwritten by the 12-dword basis
+//           copy at 0x509030, so it is not the field to load.
+//   +0x064  wheel radius         [m]         (key "rwheel", 0x5087fa, esi-0x5c)
+//   +0x068  rear wheel radius    [m]         (key "rwheel1", 0x50881c)
+//   +0x06c  tank                 [l]         (key "tank", 0x508b0b, ebx+0x6c).
+//           The shipped floats also satisfy tank = fuelConsumption * kilometrage
+//           (0x508af4). This is not horse_power.
+//   +0x0a0  fuelConsumption      [l / km-unit] (0x508aaf, ebx+0xa0). Seed is
+//           mass * 0.001 (dword 0x64dac8); the ini default is that seed times
+//           FuelScale (dword 0x674ae8 = 10), then the stored value is divided
+//           by FuelScale again (0x508ae1).
+//   +0x0a8  kilometrage          (0x508a82, ebx+0xa8, default 50)
+//   +0x070  fuelTimeEndurance    (0x508a1f, ebx+0x70, default dword 0x674ae4
+//           = 1200). ZIL stores 846.22. The per-tick burn at 0x500641 divides
+//           by this value; it does not read +0xa0. Not applied: the two other
+//           factors are filter outputs (see Vehicle.cpp).
 //   +0x0ac  air_press_coeff      [0.3]       (king.exe 0x50888a)
 //   +0x0b0  air_resist_coeff     [0.3]       (king.exe 0x5088ac)
 //   +0x0b4  air_side_resist_coeff[0.8]       (king.exe 0x5088d5)
-//   +0x0c0  maxrotmomentum       [kg m^2/s]  (king.exe 0x5087bd)
-//   +0x0c8  price                                             (0x509121)
-//   +0x0cc  rear_axle_coeff      [5.0]       (king.exe 0x50891a)
+//   +0x0c0  maxrotmomentum       [kg m^2/s]  (king.exe 0x5087bd, dest esi)
+//   +0x0c4  derived, no key: maxrotmomentum * 0.2 / (2 * tach_rps)
+//           (0x508a39..0x508a4b, qword 0x64b840 = 0.2). Copied to vehicle+0x1c8c
+//           (0x4ed3cc) and multiplied inside 0x507360. Not the port's
+//           inertia M / (2π·tach).
+//   +0x0c8  breakpower           (0x5087d8 dest esi+8, default 5872). The
+//           shipped ZIL float is 36000. No instruction was isolated that
+//           applies this float as a brake force, so the port does not feed it
+//           into braking.
+//   +0x0cc  rear_axle_coeff      [5.0]       (king.exe 0x50891a, esi+0xc)
 //   +0x0d0  reverse_trans_coeff  [-4.0]      (king.exe 0x50893e)
 //   +0x0d8+ gear_trans_coeff1..13             (king.exe 0x50897d; a missing
 //           gear is auto-filled as prev * 5/7, 0x64dae8 = 5/7 at 0x5089b7)
 //   +0x10c  tach_with_max_power  [rev/s]     (king.exe 0x5088f3, default 20)
+//   +0x11c  body_square          [m^2]       (king.exe 0x5098bf, ebx+0x11c)
+//   +0x12c  driving_wheels[8]    ints        (king.exe 0x508f9a). Indexed
+//           address 0x697994 has no reader; the ctor never loads stack slot
+//           0x248+0x12c. kDriveShare stays 0.55.
+//   +0x7c4  horse_power          int         (king.exe 0x5090f3, default 150).
+//           Indexed address 0x69802c has no reader, and the file contains no
+//           735.5 / 745.7 / 735.0 float or double. The engine output is
+//           0x4ff460 → 0x507380 (exp and sin), not P = n·735.5. The port still
+//           feeds the +0x6c float (the tank) into that watt expression.
+//   +0x7c8  price                int         (king.exe 0x509116, default 10000)
 //   +0x860  numtech              [count]     (0x4ec861 reads 0x6980c8 = +0x860)
 //
 // `maxrotmomentum` is the engine's angular momentum at the max-power speed:
@@ -64,9 +95,15 @@ public:
         float mass = 0.0f;        // kg
         float wheelRadius = 0.0f; // m
         float wheelRadiusRear = 0.0f;
-        float powerHp = 0.0f;
+        float powerHp = 0.0f;        // +0x6c float, the port torque input (same slot as the tank)
+        float tankLitres = 0.0f;     // +0x6c, key "tank"
+        float fuelPerKm = 0.0f;      // +0xa0, key "fuelConsumption"
+        float rangeKm = 0.0f;         // +0xa8, key "kilometrage"
         float maxRotMomentum = 0.0f;
-        float price = 0.0f;
+        float breakPower = 0.0f;     // +0xc8, key "breakpower" (not applied)
+        int techPrice = 0;           // +0x7c8, key "price"
+        int horsePower = 0;          // +0x7c4, key "horse_power" (no other xref)
+        float bodySquare = 0.0f;     // +0x11c, key "body_square"
         float rearAxle = 5.0f;
         float reverseCoeff = -4.0f;
         float airPress = 0.3f, airResist = 0.3f, airSide = 0.8f;
@@ -115,6 +152,11 @@ public:
     float pitch() const { return pitch_; }
     float roll() const { return roll_; }
     float steering() const { return steer_; } // smoothed steering, -1..1
+    // Tyre radius from the tech record (+0x64). The rendered wheel spin is
+    // odometer / this, the same ground-speed ratio the drivetrain uses.
+    float wheelRadius() const {
+        return spec_.wheelRadius > 0.01f ? spec_.wheelRadius : 0.5f;
+    }
     // distance travelled since reset (for the drive test)
     float odometer() const { return odo_; }
     // Instrument cluster values: fuel 0..1 of the vehicle's own tank, the gear
@@ -157,6 +199,8 @@ public:
     float wheelbase() const { return wheelbase_; }
     void setWheelbase(float metres);
     float tankLitres() const { return tankLitres_; }
+    // record+0x11c when the shipped area is positive; otherwise the mass proxy.
+    static float frontalArea(float bodySquare, float mass);
 
     // Station price per litre. king.exe 0x433240 takes the 3D distance from
     // the vehicle (x, horizontal, height) to the nearer of (-1720, 3950, 3)
@@ -203,9 +247,11 @@ public:
     // in the port the held brake is the equivalent gesture).
     static constexpr float kReverseHold = 0.35f;
     static constexpr float kMaxSteerDeg = 38.0f;    // lock at the wheel
-    // Braking.  king.exe reads a "breakpower" key (0x5087e9, default 5872) but
-    // the key could not be located inside the binary record, so the deceleration
-    // is the standard heavy-vehicle 0.5 g; the handbrake locks the rear axle.
+    // Braking.  king.exe stores "breakpower" at record+0xc8 (0x5087d8, default
+    // 5872; ZIL ships 36000). Dividing that float by weight is not a constant
+    // deceleration across the 43 records, and the force-site was not separated
+    // from unrelated [reg+0xc8] uses, so the deceleration stays 0.5 g. The
+    // handbrake locks the rear axle.
     static constexpr float kBrakeG = 0.50f;
     static constexpr float kHandbrakeG = 0.75f;
     static constexpr float kRollingCrr = 0.006f;    // asphalt, 0.6% of the weight

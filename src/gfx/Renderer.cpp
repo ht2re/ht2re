@@ -941,12 +941,15 @@ bool Renderer::buildSceneMesh() {
 }
 
 bool Renderer::buildVehicleMesh() {
-    return buildMeshFor(vehicleMeshes, vehicleTex, vvao, vvbo, vvebo, vvTriCount, vehicleRanges);
+    // Wheel parts are drawn on their own matrix (steer + spin).  Leaving them
+    // in this batch freezes the tyre at the bind pose.
+    return buildMeshFor(vehicleMeshes, vehicleTex, vvao, vvbo, vvebo, vvTriCount, vehicleRanges,
+                        true);
 }
 
 bool Renderer::buildMeshFor(const std::vector<B3D::SubMesh>* meshes, const SceneTextures* stex,
                             unsigned& outVao, unsigned& outVbo, unsigned& outEbo,
-                            unsigned& outCount, std::vector<Range>& outRanges) {
+                            unsigned& outCount, std::vector<Range>& outRanges, bool skipWheels) {
     const SceneTextures* sceneTex = stex;
     std::vector<Range>& sceneRanges = outRanges;
     unsigned& svao = outVao; unsigned& svbo = outVbo; unsigned& sebo = outEbo;
@@ -968,7 +971,8 @@ bool Renderer::buildMeshFor(const std::vector<B3D::SubMesh>* meshes, const Scene
     std::unordered_map<uint64_t, size_t> groupIndex;
     auto chunkOf = [](float v) { return (int64_t)std::floor(v / kChunk); };
     for (const auto& sm : *meshes) {
-        unsigned tex = sceneTex ? sceneTex->textureFor(sm.material) : 0u;
+        if (skipWheels && sm.wheelRole) continue;
+        unsigned tex = sceneTex ? sceneTex->textureFor(sm.material, sm.texTile) : 0u;
         uint64_t key = ((uint64_t)(uint32_t)chunkOf(sm.center[0]) << 40) ^
                        ((uint64_t)(uint32_t)chunkOf(sm.center[1]) << 12) ^ (uint64_t)tex;
         auto it = groupIndex.find(key);
@@ -1422,7 +1426,7 @@ std::string Renderer::TexStats::line() const {
     return std::string(buf);
 }
 
-unsigned Renderer::createTexture(const uint8_t* rgba, int w, int h) {
+unsigned Renderer::createTexture(const uint8_t* rgba, int w, int h, bool clamp) {
     GLuint t = 0;
     gl.glGenTextures(1, &t);
     gl.glBindTexture(GL_TEXTURE_2D, t);
@@ -1430,8 +1434,11 @@ unsigned Renderer::createTexture(const uint8_t* rgba, int w, int h) {
     // 5x across 12 units), so wrapping must repeat - clamping stretched the
     // border texels across the whole polygon, which is what made road surfaces
     // look like they were "flowing".  Mipmaps remove the shimmer at distance.
-    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    // `notile` materials (mat_Zgas and the other signs) are the exception:
+    // repeat wraps the colour-keyed border across the sign and leaves a hole.
+    const int wrap = clamp ? GL_CLAMP_TO_EDGE : GL_REPEAT;
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap);
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap);
     gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);

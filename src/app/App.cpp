@@ -129,6 +129,7 @@ int App::run(const Options& o) {
         if (haveTrucks_) {
             vehicleTex_.load(r_, opt_.dataDir + "/COMMON/TRUCKS");
             r_.setVehicleScene(&trucks_, &vehicleTex_);
+            bindPlayerWheels();
             cockpit_.load(r_, opt_.dataDir, opt_.vehicle);   // COMMON/CABINES.B3D
             // Rear-view mirror art (COMMON/esc16.RES mirr*.msk) + reflection
             // target; a no-op (and no per-frame cost) when the art is missing.
@@ -229,6 +230,15 @@ int App::run(const Options& o) {
     esc_.load(opt_.dataDir);
     esc_.loadArt(r_);
     if (escWanted) {
+        // B posts the offer before the board opens.  A direct order screen
+        // (the same board) was blank until the 20 s clock.  Post first so the
+        // rows are the cargo, the premium and the weight.
+        if (opt_.escScreen == "order") {
+            const Economy::TerminalWindow term =
+                economy_.terminalAt(vehicle3d_.x(), vehicle3d_.z());
+            if (!term.unload && term.town >= 0 && term.job < 0)
+                economy_.postOffers();
+        }
         syncEscContext();
         if (audio_.ready()) {          // seed the ЗВУК sliders from TRUCK.INI
             esc_.setSliderValue("voll", audio_.masterVolume());
@@ -869,6 +879,7 @@ void App::refreshPlayerVisual() {
     if (!trucks_.buildVehicleScene(opt_.vehicle, state)) return;
     overlay_.applyParts(trucks_.submeshesMutable(), opt_.vehicle);
     r_.setVehicleScene(&trucks_, &vehicleTex_);
+    bindPlayerWheels();
     playerVisualState_ = state;
 }
 
@@ -1084,6 +1095,7 @@ void App::spawnTraffic() {
     trafficYOff_.clear();
     trafficIntact_.clear();
     trafficDamaged_.clear();
+    trafficWheels_.clear();
     for (const char* model : wanted) {
         if ((int)ids.size() >= opt_.trafficModels) break;
         if (!trafficB3d_.buildVehicleScene(model)) continue;
@@ -1092,13 +1104,18 @@ void App::spawnTraffic() {
         const std::vector<B3D::SubMesh> intact = trafficB3d_.submeshes();
         trafficB3d_.buildVehicleScene(model, 3);
         const std::vector<B3D::SubMesh> wrecked = trafficB3d_.submeshes();
-        const int idIntact = r_.addTrafficModel(intact, &vehicleTex_);
-        const int idDented = r_.addTrafficModel(wrecked, &vehicleTex_);
+        std::vector<B3D::SubMesh> body, wreckBody;
+        std::vector<WheelVis> wheels = packWheels(intact, &body);
+        for (const auto& sm : wrecked)
+            if (!sm.wheelRole) wreckBody.push_back(sm);
+        const int idIntact = r_.addTrafficModel(body.empty() ? intact : body, &vehicleTex_);
+        const int idDented = r_.addTrafficModel(wreckBody.empty() ? wrecked : wreckBody, &vehicleTex_);
         if (idIntact >= 0) {
             ids.push_back((int)ids.size());           // model *index*, not batch id
             trafficYOff_.push_back(off);
             trafficIntact_.push_back(idIntact);
             trafficDamaged_.push_back(idDented);
+            trafficWheels_.push_back(std::move(wheels));
               traffic_.setBody((int)ids.size() - 1, len, rad, height);
               bool freight = false;
               for (const auto& def : gameData_.vehicles)
@@ -1229,6 +1246,83 @@ Mat4 App::trafficRoadPose(const Traffic::Car& c) const {
     return Mat4::translation(px, py, pz) * Mat4::rotY(c.yaw) * Mat4::rotX(-pitch) * Mat4::rotZ(roll);
 }
 
+std::vector<App::WheelVis> App::packWheels(const std::vector<B3D::SubMesh>& all,
+                                                std::vector<B3D::SubMesh>* body) {
+    struct Bucket {
+        float pivot[3] = {0, 0, 0};
+        bool steer = false;
+        std::vector<B3D::SubMesh> parts;
+    };
+    std::vector<Bucket> buckets;
+    if (body) body->clear();
+    for (const auto& sm : all) {
+        if (!sm.wheelRole) {
+            if (body) body->push_back(sm);
+            continue;
+        }
+        int found = -1;
+        for (size_t i = 0; i < buckets.size(); ++i) {
+            const float dx = buckets[i].pivot[0] - sm.wheelPivot[0];
+            const float dz = buckets[i].pivot[1] - sm.wheelPivot[1];
+            const float dy = buckets[i].pivot[2] - sm.wheelPivot[2];
+            if (buckets[i].steer == (sm.wheelRole == 1) &&
+                dx * dx + dy * dy + dz * dz < 0.05f * 0.05f) {
+                found = (int)i;
+                break;
+            }
+        }
+        if (found < 0) {
+            Bucket b;
+            b.pivot[0] = sm.wheelPivot[0];
+            b.pivot[1] = sm.wheelPivot[1];
+            b.pivot[2] = sm.wheelPivot[2];
+            b.steer = sm.wheelRole == 1;
+            buckets.push_back(b);
+            found = (int)buckets.size() - 1;
+        }
+        buckets[(size_t)found].parts.push_back(sm);
+    }
+    std::vector<WheelVis> out;
+    for (auto& b : buckets) {
+        WheelVis w;
+        w.pivot[0] = b.pivot[0];
+        w.pivot[1] = b.pivot[1];
+        w.pivot[2] = b.pivot[2];
+        w.steer = b.steer;
+        w.batch = r_.addTrafficModel(b.parts, &vehicleTex_);
+        if (w.batch >= 0) out.push_back(w);
+    }
+    return out;
+}
+
+void App::bindPlayerWheels() {
+    playerWheels_ = packWheels(trucks_.submeshes(), nullptr);
+    LOG("vehicle: %zu wheel batches (front axle steers)", playerWheels_.size());
+}
+
+void App::drawWheelVis(const std::vector<WheelVis>& wheels, const Mat4& body,
+                       float spinRad, float steerDeg) {
+    for (const auto& w : wheels) {
+        // b3d (x, z, height) -> GL (x, height, z).  Spin about the axle (+X),
+        // then yaw the front wheels about up.  The mesh is already in vehicle
+        // space, so the rotation is about the anchor pivot.
+        const float px = w.pivot[0], py = w.pivot[2], pz = w.pivot[1];
+        const float sd = w.steer ? steerDeg : 0.0f;
+        const Mat4 local = Mat4::translation(px, py, pz) * Mat4::rotY(sd) *
+                           Mat4::rotX(spinRad) * Mat4::translation(-px, -py, -pz);
+        r_.drawTrafficInstance(w.batch, body * local);
+    }
+}
+
+void App::drawPlayerWheels(float cx, float cy, float cz, float yaw, float pitch) {
+    if (playerWheels_.empty()) return;
+    const float spin = -vehicle3d_.odometer() / vehicle3d_.wheelRadius();
+    const float steer = vehicle3d_.steering() * Vehicle::kMaxSteerDeg;
+    r_.beginTraffic(cx, cy, cz, yaw, pitch);
+    drawWheelVis(playerWheels_, vehicle3d_.modelMatrix(), spin, steer);
+    r_.endTraffic();
+}
+
 void App::drawTraffic(float cx, float cy, float cz, float yaw, float pitch) {
     const std::vector<Traffic::Car>& cars = traffic_.cars();
     if (cars.empty()) return;
@@ -1247,6 +1341,12 @@ void App::drawTraffic(float cx, float cy, float cz, float yaw, float pitch) {
         if (c.model >= 0 && c.model < (int)trafficYOff_.size())
             m = m * Mat4::translation(0,trafficYOff_[(size_t)c.model],0);
         r_.drawTrafficInstance(batch, m);
+        // Spin follows metres travelled on the edge.  Traffic::Car has no
+        // separate steer angle (the body yaw already follows the lane), so
+        // the AI tyres roll and stay straight.  The player's front axle
+        // steers in drawPlayerWheels.
+        if (c.model >= 0 && c.model < (int)trafficWheels_.size())
+            drawWheelVis(trafficWheels_[(size_t)c.model], m, -c.s / 0.5f, 0.0f);
     }
     r_.endTraffic();
 }
@@ -1478,6 +1578,7 @@ bool App::switchPlayerVehicle(const std::string& model) {
         return false;
     }
     r_.setVehicleScene(&trucks_, &vehicleTex_);
+    bindPlayerWheels();
     playerVisualState_ = 0;
     cockpit_.load(r_, opt_.dataDir, model);      // rebind the instruments (no-op if same brand)
     mirror_.load(r_, opt_.dataDir, &trucks_.anchorList, model);   // rebind the mirror mount
@@ -1979,9 +2080,13 @@ void App::loadWorldTiles() {
         t.buildScene();
         total += t.submeshes().size();
         for (const auto& hp : t.hitProxies()) worldProxies_.push_back(hp);
-        for (auto& sm : t.submeshesMutable()) worldMeshes_.push_back(std::move(sm));
         // texture base: <dir>/ENV/<tile>
         std::string base = p.substr(0, p.size() - 4);
+        const std::string tile = SceneTextures::tileKey(base);
+        for (auto& sm : t.submeshesMutable()) {
+            sm.texTile = tile;
+            worldMeshes_.push_back(std::move(sm));
+        }
         worldTileNames_.push_back(base);
     }
     {
@@ -3053,6 +3158,7 @@ void App::enterWorld() {
         if (vehicleTex_.count() == 0)
             vehicleTex_.load(r_, opt_.dataDir + "/COMMON/TRUCKS");
         r_.setVehicleScene(&trucks_, &vehicleTex_);
+        bindPlayerWheels();
         // The 3D cockpit instruments live in COMMON/CABINES.B3D (docs/cockpit.md);
         // Cockpit is a no-op when the file or the model's cab is missing.
         cockpit_.load(r_, opt_.dataDir, opt_.vehicle);
@@ -3359,7 +3465,14 @@ void App::drawWorld(float dt, bool interactive) {
             };
             if (st.viewToggle) viewMode_ = (viewMode_ + 1) % 3;
             if (st.buy) {
-                if (economy_.dealerNear(vehicle3d_.x(), vehicle3d_.z(), 120.0f) >= 0)
+                // The order board is the product card (cargo, premium, weight).
+                // B used to open only the vehicle sale, so a depot never showed it.
+                const Economy::TerminalWindow term =
+                    economy_.terminalAt(vehicle3d_.x(), vehicle3d_.z());
+                if (!term.unload && term.town >= 0) {
+                    if (term.job < 0) economy_.postOffers();
+                    openPanel("order");
+                } else if (economy_.dealerNear(vehicle3d_.x(), vehicle3d_.z(), 120.0f) >= 0)
                     openPanel("sale");
             }
             if (st.job) {
@@ -3468,7 +3581,10 @@ void App::drawWorld(float dt, bool interactive) {
         // this model) and in the bonnet view the previous two-sided behaviour
         // is kept.
         const bool cockpitInstruments = cockpit_.loaded() && viewMode_ == 1;
-        r_.setVehicleTwoSided(!cockpitInstruments && viewMode_ != 0);
+        // Chase view used to cull.  Anchor mirrors (det < 0) flip winding, so
+        // those panels disappeared and the body looked holed.  The cockpit
+        // with its own interior still culls the exterior shell.
+        r_.setVehicleTwoSided(!cockpitInstruments);
         r_.drawSky(camPitch);
         r_.draw(cx, cy, cz, camYaw, camPitch);
         if (haveWorldScene_) r_.drawScene(cx, cy, cz, camYaw, camPitch);
@@ -3482,6 +3598,7 @@ void App::drawWorld(float dt, bool interactive) {
             r_.setModel(vehicle3d_.modelMatrix());
             r_.drawVehicleScene(cx, cy, cz, camYaw, camPitch);
             r_.clearModel();
+            drawPlayerWheels(cx, cy, cz, camYaw, camPitch);
         }
         // Cockpit instruments (src/game/Cockpit.cpp): only in the cockpit view,
         // and only from the deterministic vehicle state (speed/rpm/fuel).
@@ -3499,9 +3616,13 @@ void App::drawWorld(float dt, bool interactive) {
         r_.setNearPlane(2.0f);
     }
     if (haveTrucks_ && opt_.camGiven) {
+        // The free camera is an outside view, same as chase: mirrored anchors
+        // disappear if the shell is culled.
+        r_.setVehicleTwoSided(true);
         r_.setModel(vehicle3d_.modelMatrix());
         r_.drawVehicleScene(worldCam_[0], worldCam_[1], worldCam_[2], worldCam_[3], worldCam_[4]);
         r_.clearModel();
+        drawPlayerWheels(worldCam_[0], worldCam_[1], worldCam_[2], worldCam_[3], worldCam_[4]);
     }
 
     if (getenv("HT2_CULL_DEBUG")) {

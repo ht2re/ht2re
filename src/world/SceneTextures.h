@@ -20,8 +20,13 @@ public:
     // The shared .plm palette (COMMON.RES) - needed to resolve the colour keys
     // declared by the .res MATERIALS table ("ttx N [col C]").
     static void loadPalette(const std::string& commonResPath);
-    // 0 means "no texture" (the renderer falls back to the material colour)
-    unsigned textureFor(const std::string& material) const;
+    // Last path component, lower case, underscores dropped.  The same key
+    // SceneTextures uses to qualify a texture by the .res it came from.
+    static std::string tileKey(const std::string& resBase);
+    // 0 means "no texture" (the renderer falls back to the material colour).
+    // `tile` (from SubMesh::texTile) prefers that .res over the first file
+    // that happened to use the same stem.
+    unsigned textureFor(const std::string& material, const std::string& tile = {}) const;
     unsigned white() const { return white_; }
     size_t count() const { return tex_.size(); }
     size_t decoded() const { return decoded_; }

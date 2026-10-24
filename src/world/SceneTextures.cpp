@@ -56,7 +56,8 @@ static int rgbTo565(int r, int g, int b) {
 // material: "<name> ttx <N> col <C> ..." - `ttx N` (1-based) marks texture N of
 // this .res as colour-keyed, `col C` selects palette entry C-1 (default 1 =
 // black).  Textures with no `ttx` material stay opaque.
-static void parseMaterialKeys(const std::vector<uint8_t>& raw, std::vector<int>& keyOfTex) {
+static void parseMaterialKeys(const std::vector<uint8_t>& raw, std::vector<int>& keyOfTex,
+                              std::vector<char>& noTile) {
     static const char* kTag = "MATERIALS ";
     size_t at = std::string::npos;
     for (size_t i = 0; i + 10 <= raw.size(); ++i)
@@ -73,11 +74,13 @@ static void parseMaterialKeys(const std::vector<uint8_t>& raw, std::vector<int>&
         std::string line((const char*)raw.data() + p, end - p);
         p = end + 1;
         int ttx = -1, col = 1;
+        bool notile = false;
         for (size_t k = 0; k < line.size();) {
             while (k < line.size() && line[k] == ' ') ++k;
             size_t s0 = k;
             while (k < line.size() && line[k] != ' ') ++k;
             std::string tok = line.substr(s0, k - s0);
+            if (tok == "notile") { notile = true; continue; }
             if (tok == "ttx" || tok == "col") {
                 while (k < line.size() && line[k] == ' ') ++k;
                 size_t v0 = k;
@@ -90,6 +93,10 @@ static void parseMaterialKeys(const std::vector<uint8_t>& raw, std::vector<int>&
         if (ttx <= 0) continue;
         size_t idx = (size_t)(ttx - 1);
         if (idx >= keyOfTex.size()) keyOfTex.resize(idx + 1, -1);
+        if (notile) {
+            if (idx >= noTile.size()) noTile.resize(idx + 1, 0);
+            noTile[idx] = 1;
+        }
         int c = col - 1;
         if (c < 0 || c > 255) c = 0;
         keyOfTex[idx] = rgbTo565(g_palette[(size_t)c * 3], g_palette[(size_t)c * 3 + 1],
@@ -97,24 +104,33 @@ static void parseMaterialKeys(const std::vector<uint8_t>& raw, std::vector<int>&
     }
 }
 
+std::string SceneTextures::tileKey(const std::string& resBase) { return normalize(resBase); }
+
 bool SceneTextures::load(Renderer& r, const std::string& resBase, bool skipNoLoad) {
     base_ = resBase;
     white_ = r.whiteTex();
+    const std::string tile = normalize(resBase);
     const char* suffix[3] = {"", "1", "2"};
     for (int k = 0; k < 3; ++k) {
         Res res;
         std::string path = resBase + suffix[k] + ".res";
         if (!res.load(path)) continue;
         std::vector<int> keyOfTex;
-        parseMaterialKeys(res.bytes(), keyOfTex);
+        std::vector<char> noTile;
+        parseMaterialKeys(res.bytes(), keyOfTex, noTile);
         size_t texOrdinal = 0;
         for (auto& e : res.entries()) {
             if (e.kind != Res::Kind::Texture) continue;
             if (skipNoLoad && e.flags.find("noload") != std::string::npos) continue;
             int key565 = texOrdinal < keyOfTex.size() ? keyOfTex[texOrdinal] : -1;
+            const bool clamp = texOrdinal < noTile.size() && noTile[texOrdinal];
             ++texOrdinal;
             std::string key = normalize(e.name);
-            if (map_.count(key)) continue;      // first file wins (highest detail)
+            // king.exe looks the texture up in this .res.  A shared stem
+            // (Zgas.txr in ac.res and eurotxr/Zgas.txr in ce.res) is a
+            // different image; the first file must not hide the later one.
+            const std::string qual = tile + "/" + key;
+            if (map_.count(key) && map_.count(qual)) continue;
             DecodedImage img;
             if (!Texture::decode(res.data(e), e.size, img, key565)) {
                 LOG("tex: decode failed %s", e.name.c_str());
@@ -125,9 +141,10 @@ bool SceneTextures::load(Renderer& r, const std::string& resBase, bool skipNoLoa
                 if (getenv("HT2_TEX_DEBUG"))
                     LOG("tex: keyed %-28s %s", e.name.c_str(), img.format.c_str());
             }
-            unsigned id = r.createTexture(img.rgba.data(), img.width, img.height);
+            unsigned id = r.createTexture(img.rgba.data(), img.width, img.height, clamp);
             if (!id) continue;
-            map_[key] = id;
+            if (!map_.count(qual)) map_[qual] = id;
+            if (!map_.count(key)) map_[key] = id;   // first file wins for unqualified lookups
             tex_.push_back(id);
             ++decoded_;
         }
@@ -145,11 +162,15 @@ bool SceneTextures::load(Renderer& r, const std::string& resBase, bool skipNoLoa
     return !map_.empty();
 }
 
-unsigned SceneTextures::textureFor(const std::string& material) const {
+unsigned SceneTextures::textureFor(const std::string& material, const std::string& tile) const {
     if (material.empty() || map_.empty()) return 0;
     std::string key = normalize(material);
     // material names carry a "mat_" prefix that texture names drop
     if (key.compare(0, 3, "mat") == 0) key = key.substr(3);
+    if (!tile.empty()) {
+        auto q = map_.find(tile + "/" + key);
+        if (q != map_.end()) return q->second;
+    }
     auto it = map_.find(key);
     if (it != map_.end()) return it->second;
     // aliases seen in the shipped data (mat_red_d -> rd_d, ...)

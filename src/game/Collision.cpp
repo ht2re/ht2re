@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <string>
+#include <unordered_set>
 
 // ---------------------------------------------------------------------------
 // The blocking rule
@@ -51,15 +52,6 @@ const char* const kGroundMat[] = {
     "sidewalk", "kerb", "curb", "trotoar", "trotuar", "stoika", "stoyanka",
     "parking", "runway", "taxiway", "apron", "swamp", "bshadow", "river",
     "tonnel", "zont", "bottom_bridge", "bridge_0",
-    // `mat_forest*` are scenery billboards: single vertical quads tens of metres
-    // across used to paint a forest block, not obstacles.  Treating them as solid
-    // put invisible walls straight across roads (ap.b3d's `obj_ap_048` crosses the
-    // apron road 80 m west of the GAME.CNF start).  The engine's real collision is
-    // the authored `hit_obj_*`/`hit_road_*` proxies, which the port does not decode
-    // yet (their containers are link targets and carry subtag-40 records); until
-    // they are, scenery must not block.  Individual `mat_tree*` billboards stay
-    // solid, as docs/collision.md documents.
-    "forest",
 };
 const char* const kSolidMat[] = {
     "stolb", "pillar", "column", "kolonn", "wall", "fence", "confence",
@@ -81,6 +73,29 @@ int popcount64(uint64_t v) {
     while (v) { v &= v - 1; ++n; }
     return n;
 #endif
+}
+
+// mat_forest* are vertical scenery quads.  They are the world-edge barrier
+// the player can drive through when they are skipped entirely.  A few of
+// them also lie across a carriageway (ap.b3d obj_ap_048 west of the start),
+// so only a forest triangle that does not cover road/apron/asphalt is solid.
+bool isForestBillboard(const std::string& material) {
+    return lower(material).find("forest") != std::string::npos;
+}
+bool isCarriageway(const std::string& material) {
+    const std::string m = lower(material);
+    return m.find("road") != std::string::npos || m.find("asphalt") != std::string::npos ||
+           m.find("apron") != std::string::npos;
+}
+bool pointInTriXZ(const float* a, const float* b, const float* c, float x, float z) {
+    const float e = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    if (std::fabs(e) < 1e-8f) return false;
+    const float w0 = ((b[0] - x) * (c[1] - z) - (b[1] - z) * (c[0] - x)) / e;
+    const float w1 = ((c[0] - x) * (a[1] - z) - (c[1] - z) * (a[0] - x)) / e;
+    const float w2 = 1.0f - w0 - w1;
+    const float eps = 1e-3f;
+    return (w0 >= -eps && w1 >= -eps && w2 >= -eps) ||
+           (w0 <= eps && w1 <= eps && w2 <= eps);
 }
 
 bool isGroundMaterial(const std::string& material) {
@@ -248,6 +263,37 @@ void Collision::build(const std::vector<B3D::SubMesh>& meshes, float cellSize,
     stats_.gridCells = (size_t)nx_ * (size_t)nz_;
     bits_.assign((stats_.gridCells + 63) / 64, 0ull);
 
+    // Carriageway cells (2 m).  A forest billboard is solid unless one of
+    // these centres lies inside it, which is the apron-crossing quad and not
+    // the map-edge barrier.
+    std::unordered_set<uint64_t> roadCells;
+    auto roadKey = [](float x, float z) -> uint64_t {
+        const int cx = (int)std::floor(x / 2.0f);
+        const int cz = (int)std::floor(z / 2.0f);
+        return (uint64_t)(uint32_t)cx << 32 | (uint32_t)cz;
+    };
+    for (const B3D::SubMesh& sm : meshes) {
+        if (!isCarriageway(sm.material)) continue;
+        for (size_t t = 0; t + 2 < sm.idx.size(); t += 3) {
+            const uint32_t ia = sm.idx[t], ib = sm.idx[t + 1], ic = sm.idx[t + 2];
+            if ((size_t)ia * 3 + 2 >= sm.pos.size() || (size_t)ib * 3 + 2 >= sm.pos.size() ||
+                (size_t)ic * 3 + 2 >= sm.pos.size())
+                continue;
+            const float* a = &sm.pos[(size_t)ia * 3];
+            const float* b = &sm.pos[(size_t)ib * 3];
+            const float* c = &sm.pos[(size_t)ic * 3];
+            if (absurd(a) || absurd(b) || absurd(c)) continue;
+            const float tx0 = std::min(a[0], std::min(b[0], c[0]));
+            const float tx1 = std::max(a[0], std::max(b[0], c[0]));
+            const float tz0 = std::min(a[1], std::min(b[1], c[1]));
+            const float tz1 = std::max(a[1], std::max(b[1], c[1]));
+            for (float z = std::floor(tz0 / 2.0f) * 2.0f; z <= tz1; z += 2.0f)
+                for (float x = std::floor(tx0 / 2.0f) * 2.0f; x <= tx1; x += 2.0f)
+                    if (pointInTriXZ(a, b, c, x + 1.0f, z + 1.0f))
+                        roadCells.insert(roadKey(x + 1.0f, z + 1.0f));
+        }
+    }
+
     // --- pass 2: rasterise the wall-like triangles --------------------------
     for (size_t si = 0; si < meshes.size(); ++si) {
         const B3D::SubMesh& sm = meshes[si];
@@ -265,6 +311,20 @@ void Collision::build(const std::vector<B3D::SubMesh>& meshes, float cellSize,
             const float* b = &sm.pos[(size_t)ib * 3];
             const float* c = &sm.pos[(size_t)ic * 3];
             if (absurd(a) || absurd(b) || absurd(c)) continue;
+            if (isForestBillboard(sm.material)) {
+                const float tx0 = std::min(a[0], std::min(b[0], c[0]));
+                const float tx1 = std::max(a[0], std::max(b[0], c[0]));
+                const float tz0 = std::min(a[1], std::min(b[1], c[1]));
+                const float tz1 = std::max(a[1], std::max(b[1], c[1]));
+                bool coversRoad = false;
+                for (float z = std::floor(tz0 / 2.0f) * 2.0f; z <= tz1 && !coversRoad; z += 2.0f)
+                    for (float x = std::floor(tx0 / 2.0f) * 2.0f; x <= tx1; x += 2.0f) {
+                        const float cx = x + 1.0f, cz = z + 1.0f;
+                        if (!roadCells.count(roadKey(cx, cz))) continue;
+                        if (pointInTriXZ(a, b, c, cx, cz)) { coversRoad = true; break; }
+                    }
+                if (coversRoad) continue;   // the billboard lies on the carriageway
+            }
             if (triUpComponent(a, b, c) > kHorizontalUp) continue;   // surface
             ++stats_.triangles;
             const size_t wall = walls_.size();

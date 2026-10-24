@@ -168,7 +168,9 @@ public:
     // full glGenerateMipmap chain (so it is safe to draw in 3D at any distance),
     // plus anisotropic filtering when GL_EXT_texture_filter_anisotropic is
     // available - min(8, driver maximum), see anisotropy()/maxAnisotropy().
-    unsigned createTexture(const uint8_t* rgba, int w, int h);
+    // `clamp` is the MATERIALS `notile` flag (signs such as mat_Zgas).  Roads
+    // stay repeating; clamping those is what smeared the asphalt.
+    unsigned createTexture(const uint8_t* rgba, int w, int h, bool clamp = false);
     // Re-uploads a texture created with createTexture() from a full RGBA frame
     // (glBindTexture + glTexSubImage2D) and drops its mipmaps so the caller can
     // stream frames into it (video playback).  Returns false for an unknown
@@ -326,7 +328,7 @@ private:
     bool buildVehicleMeshImpl();
     bool buildMeshFor(const std::vector<B3D::SubMesh>* meshes, const SceneTextures* stex,
                       unsigned& vao, unsigned& vbo, unsigned& ebo, unsigned& count,
-                      std::vector<Range>& ranges);
+                      std::vector<Range>& ranges, bool skipWheels = false);
     bool glReady = false;
     std::vector<Batch> batches;
     unsigned textureUpdates_ = 0, lastUpdatedTex_ = 0;
