@@ -396,6 +396,8 @@ void EscMenu::buildTables() {
         BtnDef b[2];
         memcpy(b, kMarket, sizeof(b));
         b[0].action = "acceptjob";
+        // One order: the offer hanging on the terminal window the truck is
+        // parked at. The original board has no list and no scroll arrows.
         Screen& s = addScreen("order", "m_16\\BackOrder.txr", Dock::Right225, Family::Panel, 225, 1200);
         addButtons(s, b, 2);
         addRows(s, kOrderRows, sizeof(kOrderRows) / sizeof(kOrderRows[0]));
@@ -434,11 +436,11 @@ void EscMenu::buildTables() {
         addRows(s, kHireRows, sizeof(kHireRows) / sizeof(kHireRows[0]));
     }
 
-    // --- market info / ДИСПЕТЧЕРСКАЯ (3.14): BackInfo 385x1200 --------------
+    // --- Справка: BackInfo 385x1200, the list of orders posted on terminals --
     // The art paints a 4-column table (ГРУЗ | ОТКУДА | КУДА | ДЕНЬГИ): header
     // values at y=516, ten 20-px rows from y=556, columns at 42/149/239/327.
     static const BtnDef kInfo[] = {
-        {"ok",   0xb8, 40,  766, "deliverjob", 55, 30},
+        {"ok",   0xb8, 40,  766, "back", 55, 30},
         {"canc", 0x2,  105, 766, "back",       80, 30},
     };
     static const RowDef kInfoRows[] = {
@@ -848,28 +850,37 @@ void EscMenu::refresh() {
             d.jobReward = aj->reward;
             d.jobDistance = aj->distance;
         }
-        // the job the ЗАКАЗ / ДИСПЕТЧЕРСКАЯ panels show (nearest pickup)
-        if (!c.economy->jobs().empty()) {
-            std::vector<size_t> near = c.economy->jobsForPlayer(d.posX, d.posZ, 1.0e9f);
-            if (!near.empty()) {
-                const Economy::Job& j = c.economy->jobs()[near[0]];
-                d.orderIndex = (int)near[0];
-                d.orderCargo = j.cargoName;
-                d.orderTo = j.toTown;
-                d.orderReward = j.reward;
-                d.orderDistance = j.distance;
-                d.orderWeight = std::to_string(j.weight);
-                char v[32];
-                snprintf(v, sizeof v, "%.1f", j.volume);
-                d.orderVolume = v;
-                d.orderIllegal = j.illegal;
-                d.jobsNear = c.economy->jobsForPlayer(d.posX, d.posZ, 250.0f).size();
-                // the dispatcher board: the 10 nearest jobs
-                for (size_t k = 0; k < near.size() && (int)d.table.size() < 10; ++k) {
-                    const Economy::Job& jj = c.economy->jobs()[near[k]];
-                    d.table.push_back({jj.cargoName, jj.fromTown, jj.toTown, fmtMoney(jj.reward)});
-                }
-            }
+        // ЗАКАЗ is the single offer on the terminal window under the truck.
+        // Window 0 is delivery and has no offer. СПРАВКА (BackInfo) lists the
+        // offers currently posted on pickup windows, nearest first.
+        const Economy::TerminalWindow term = c.economy->terminalAt(d.posX, d.posZ);
+        if (!term.unload && term.job >= 0 && (size_t)term.job < c.economy->jobs().size()) {
+            const Economy::Job& j = c.economy->jobs()[(size_t)term.job];
+            d.orderIndex = term.job;
+            d.orderCargo = j.cargoName;
+            d.orderTo = j.toTown;
+            d.orderReward = j.reward;
+            d.orderDistance = j.distance;
+            d.orderWeight = std::to_string(j.weight);
+            char v[32];
+            snprintf(v, sizeof v, "%.1f", j.volume);
+            d.orderVolume = v;
+            d.orderIllegal = j.illegal;
+        }
+        std::vector<int> posted = c.economy->postedJobs();
+        d.jobsNear = posted.size();
+        std::sort(posted.begin(), posted.end(), [&](int a, int b) {
+            const Economy::Job& ja = c.economy->jobs()[(size_t)a];
+            const Economy::Job& jb = c.economy->jobs()[(size_t)b];
+            const float da = (ja.fromX - d.posX) * (ja.fromX - d.posX) +
+                             (ja.fromZ - d.posZ) * (ja.fromZ - d.posZ);
+            const float db = (jb.fromX - d.posX) * (jb.fromX - d.posX) +
+                             (jb.fromZ - d.posZ) * (jb.fromZ - d.posZ);
+            return da < db;
+        });
+        for (size_t k = 0; k < posted.size() && (int)d.table.size() < 10; ++k) {
+            const Economy::Job& jj = c.economy->jobs()[(size_t)posted[k]];
+            d.table.push_back({jj.cargoName, jj.fromTown, jj.toTown, fmtMoney(jj.reward)});
         }
         // the truck ПРОДАЁТСЯ shows: the cheapest unowned offer we can pay for
         int best = -1;
@@ -948,7 +959,7 @@ void EscMenu::refresh() {
     if (c.gameData) d.upgPrice = c.gameData->upgrades;
     // the highlighted line of the ПРОДАЁТСЯ list is what the panel shows and what
     // the "buyvehicle" action buys
-    if (!d.vehicleIdx.empty() && c.economy) {
+    if (!d.vehicleIdx.empty() && c.economy && cur_ == "sale") {
         if (listSel_ < 0 || listSel_ >= (int)d.vehicleIdx.size()) listSel_ = 0;
         const int oi = d.vehicleIdx[listSel_];
         const Economy::Offer& o = c.economy->offers()[oi];
@@ -1126,7 +1137,7 @@ std::string EscMenu::field(const std::string& key) const {
     }
     if (key == "order.weight") return d.orderIndex < 0 ? "-" : d.orderWeight;
     if (key == "order.volume") return d.orderIndex < 0 ? "-" : d.orderVolume;
-    if (key == "order.fragile") return d.orderIllegal ? "НЕТ" : "ДА";
+    if (key == "order.fragile") return d.orderIndex < 0 ? "-" : (d.orderIllegal ? "НЕТ" : "ДА");
     if (key == "sale.code") return d.saleIndex < 0 ? "-" : d.saleCode;
     if (key == "sale.price") return d.saleIndex < 0 ? "-" : fmtMoney(d.salePrice);
     if (key == "sale.power") {
@@ -1209,14 +1220,29 @@ void EscMenu::buildNav() {
 
 int EscMenu::firstEnabled() const { return nav_.empty() ? -1 : 0; }
 
+void EscMenu::showDock(const std::string& screenName) {
+    if (dock_ && active_ && cur_ == screenName) return;
+    open(screenName);
+    if (active_ && cur_ == screenName) dock_ = true;
+}
+
+void EscMenu::hideDock() {
+    if (!dock_) return;
+    dock_ = false;
+    if (active_) active_ = false;
+}
+
 void EscMenu::open(const std::string& screenName) {
     const Screen* s = find(screenName);
     if (!s) {
         LOG("esc: unknown screen '%s'", screenName.c_str());
         return;
     }
+    const bool changed = cur_ != s->name;
     cur_ = s->name;
+    if (changed) listSel_ = 0;
     active_ = true;
+    dock_ = false;
     if (dataDirty_) refresh();
     // the fuel panel's amount scale starts at "fill the tank"
     if (s->name == "fuel") {
@@ -1751,7 +1777,8 @@ void EscMenu::drawCells(Renderer& r, Font& font, const Screen& s, float ax, floa
 void EscMenu::drawTable(Renderer& r, Font& font, const Screen& s, float ax, float ay) {
     if (s.tableRows <= 0 || s.tableCols.empty() || !font.ready()) return;
     const bool vehicles = (s.tableKind == TableKind::Vehicles);
-    const std::vector<std::vector<std::string>>& rows = vehicles ? data_.vehicles : data_.table;
+    const std::vector<std::vector<std::string>>& rows =
+        vehicles ? data_.vehicles : data_.table;
     // the list is windowed on the highlighted line (the market list can hold 147)
     int off = 0;
     if (vehicles) {
@@ -1767,7 +1794,7 @@ void EscMenu::drawTable(Renderer& r, Font& font, const Screen& s, float ax, floa
         if (abs < 0 || abs >= (int)rows.size()) continue;
         const std::vector<std::string>& cells = rows[abs];
         const float y = ay + (float)s.tableY + (float)s.tablePitch * (float)row;
-        if (vehicles && abs == listSel_) {           // the highlighted purchase line
+        if (vehicles && abs == listSel_) {  // the highlighted line
             r.quad2D(white, ax + (float)s.tableCols[0] - 16.0f, y - 2.0f, 176.0f, 17.0f,
                      1.0f, 0.85f, 0.30f, 0.22f);
             if (s.images.empty()) { /* no art needed for the marker */ }

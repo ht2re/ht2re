@@ -335,8 +335,15 @@ void Economy::buildJobs(const GameData& gd) {
                 if (!grp.isList() || grp.head() == "node") continue;
                 for (const auto& n : grp.kids) {
                     if (!n.isList() || n.head() != "node") continue;
-                    std::string role = n.str(2);
-                    if (role == "unload" && t.unloadNode.empty()) t.unloadNode = n.str(1);
+                    Town::Bay bay;
+                    bay.name = n.str(1);
+                    for (int a = 2; a < (int)n.size(); ++a) {
+                        const std::string role = n.str(a);
+                        if (role == "unload") bay.unload = true;
+                        else if (role == "dummy") bay.dummy = true;
+                    }
+                    if (bay.unload && t.unloadNode.empty()) t.unloadNode = bay.name;
+                    if (!bay.name.empty()) t.bays.push_back(bay);
                 }
             }
             // goods: ( ( ITEM STOCK ) ... ) — 2-element lists, fuel depots too
@@ -483,6 +490,35 @@ void Economy::resolvePositions() {
 
     if (unresolvedNames.size() > 12) unresolvedNames.resize(12);
     stats_.unresolved = unresolvedNames;
+
+    // Terminal windows. The unload node is window 0 (delivery). Every other
+    // bay of the same town is a pickup window; formOrders fills those.
+    windows_.clear();
+    townJobs_.assign(towns_.size(), {});
+    for (size_t ji = 0; ji < jobs_.size(); ++ji) {
+        for (size_t ti = 0; ti < towns_.size(); ++ti) {
+            if (jobs_[ji].fromNode == towns_[ti].unloadNode) {
+                townJobs_[ti].push_back((int)ji);
+                break;
+            }
+        }
+    }
+    for (size_t ti = 0; ti < towns_.size(); ++ti) {
+        int pickup = 1;
+        for (const Town::Bay& bay : towns_[ti].bays) {
+            if (bay.dummy || bay.name.empty()) continue;
+            const Way::Node* n = wayNode(bay.name);
+            if (!n) continue;
+            TerminalWindow w;
+            w.town = (int)ti;
+            w.unload = bay.unload;
+            w.index = bay.unload ? 0 : pickup++;
+            w.name = bay.name;
+            w.x = (float)n->pos.x;
+            w.z = (float)n->pos.z;
+            windows_.push_back(w);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -602,14 +638,110 @@ bool Economy::accept(size_t jobIndex) {
     Job& j = jobs_[jobIndex];
     if (j.done || j.fromNode.empty() || j.toNode.empty()) return false;
     j.active = true;
+    // A new haul starts the arrival counter at 0 (startRaces stores 0 at
+    // [0x68d164]; loadOrder treats that 0 as "nobody has finished").
+    acceptTime_ = simTime_;
+    place_ = 0;
+    rivalArrived_ = false;
+    lastArrival_ = Arrival();
+    for (TerminalWindow& w : windows_)
+        if (w.job == (int)jobIndex) { w.job = -1; w.expires = simTime_; }
     ++loadStateRevision_;
     return true;
+}
+
+Economy::TerminalWindow Economy::terminalAt(float x, float z) const {
+    TerminalWindow best;
+    float bestD = kWindowRadius;
+    for (const TerminalWindow& w : windows_) {
+        const float d = distance2D(x, z, w.x, w.z);
+        if (d <= bestD) { bestD = d; best = w; }
+    }
+    return best;
+}
+
+std::vector<int> Economy::postedJobs() const {
+    std::vector<int> out;
+    for (const TerminalWindow& w : windows_)
+        if (!w.unload && w.job >= 0) out.push_back(w.job);
+    return out;
+}
+
+unsigned Economy::rnd() {
+    rng_ = rng_ * 1664525u + 1013904223u;
+    return rng_;
+}
+
+void Economy::rotateOffers() {
+    // formOrders walks every town node and refills an empty slot. An offer
+    // whose expiry (order+0x10) has passed is cleared first, then filled.
+    for (TerminalWindow& w : windows_) {
+        if (w.unload || w.town < 0 || (size_t)w.town >= townJobs_.size()) continue;
+        if (w.job >= 0 && simTime_ < w.expires) continue;
+        const std::vector<int>& src = townJobs_[(size_t)w.town];
+        std::vector<int> pool;
+        for (int ji : src) {
+            if (ji < 0 || (size_t)ji >= jobs_.size()) continue;
+            const Job& j = jobs_[(size_t)ji];
+            if (j.done || j.active || !canCarry(j)) continue;
+            pool.push_back(ji);
+        }
+        if (pool.empty()) {
+            w.job = -1;
+            w.expires = simTime_ + kOrderLifeBase;
+            continue;
+        }
+        w.job = pool[rnd() % pool.size()];
+        const double life = kOrderLifeBase + (double)(rnd() % (unsigned)kOrderLifeSpan);
+        w.expires = simTime_ + life;
+    }
+}
+
+void Economy::noteRival() {
+    const Job* j = activeJob();
+    if (!j || rivalArrived_) return;
+    const double eta = (double)j->distance / (double)kCruiseMps;
+    if (simTime_ < acceptTime_ + eta) return;
+    rivalArrived_ = true;
+    place_ += 1;                         // 0x4443e1 inc [0x68d164]
+    rivalNotice_ = true;                 // COMPETITOR_ARRIVED
+}
+
+void Economy::grantLicences(int count, double duration) {
+    if (count < 1) count = 1;
+    if (count > kLicenceCountCap) count = kLicenceCountCap;
+    for (int i = 0; i < count; ++i)
+        licences_.push_back(simTime_ + duration);
+    // Soonest expiry last, so the pop-from-end loop drops them in order.
+    std::sort(licences_.begin(), licences_.end(), std::greater<double>());
+}
+
+int Economy::expireLicences() {
+    int n = 0;
+    while (!licences_.empty() && simTime_ > licences_.back()) {
+        licences_.pop_back();
+        ++n;
+    }
+    return n;
+}
+
+bool Economy::takeRivalNotice() {
+    const bool v = rivalNotice_;
+    rivalNotice_ = false;
+    return v;
+}
+
+int Economy::takeExpiredLicences() {
+    const int n = expiredPulse_;
+    expiredPulse_ = 0;
+    return n;
 }
 
 bool Economy::deliver(float x, float z, float radius, long* rewardOut) {
     for (auto& j : jobs_) {
         if (!j.active) continue;
         if (distance2D(x, z, j.toX, j.toZ) > radius) return false;
+        noteRival();
         // Late?  The contract still pays, but only a fraction (the HUD's
         // ОСТ.ВРЕМЯ cell has run out).
         long paid = j.reward;
@@ -617,8 +749,28 @@ bool Economy::deliver(float x, float z, float radius, long* rewardOut) {
             paid = (long)((double)j.reward * kLatePayFraction);
             ++late_;
         }
+        Arrival arrived;
+        arrived.valid = true;
+        arrived.place = place_;
+        arrived.paid = paid;
+        if (place_ == 0) {
+            // 0x44443c: the human finisher's streak, then 0x444474 sqrt count.
+            ++wins_;
+            int count = (int)std::sqrt((double)(wins_ + 1));
+            if (count < 1) count = 1;
+            if (count > kLicenceCountCap) count = kLicenceCountCap;
+            const int span = kLicenceDurationSpan > 0 ? kLicenceDurationSpan : 1;
+            const double duration = (double)kLicenceDurationBase +
+                                    (double)((int)j.distance % span);
+            grantLicences(count, duration);
+            arrived.licencesGranted = count;
+        } else {
+            wins_ = 0;                   // 0x4444b6
+        }
+        lastArrival_ = arrived;
         j.active = false;
         j.done = true;
+        place_ = 0;
         ++loadStateRevision_;
         money_ += paid;
         ++delivered_;
@@ -632,11 +784,20 @@ bool Economy::deliver(float x, float z, float radius, long* rewardOut) {
 // simulated frame with the world's dt (so a paused ESC screen does not tick it).
 void Economy::tick(float dt) {
     if (dt <= 0.0f) return;
+    simTime_ += dt;
     for (auto& j : jobs_)
         if (j.active && j.timeLeft > 0.0f) {
             j.timeLeft -= dt;
             if (j.timeLeft < 0.0f) j.timeLeft = 0.0f;
         }
+    noteRival();
+    expiredPulse_ += expireLicences();
+    // formOrders (0x41b720): every 10 s, and only once the clock has passed 20 s.
+    formClock_ += dt;
+    if (simTime_ >= kFormOrdersWarmup && formClock_ >= kFormOrdersPeriod) {
+        formClock_ = 0;
+        rotateOffers();
+    }
 }
 
 float Economy::jobTimeLeft() const {

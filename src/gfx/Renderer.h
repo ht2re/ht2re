@@ -261,7 +261,10 @@ private:
     bool verifyMipChain(int w, int h);
     void upload3D(std::vector<TVert>& verts, std::vector<unsigned>& idx,
                   unsigned& vao, unsigned& vbo, unsigned& ebo, unsigned& count);
-    void drawRanges(unsigned vao, const std::vector<Range>& ranges);
+    // `sceneWinding` selects the Direct3D front face used by B3D meshes.
+    // The generated terrain is authored the other way; passing false keeps
+    // the front face the caller already set.
+    void drawRanges(unsigned vao, const std::vector<Range>& ranges, bool sceneWinding = true);
 
     GL gl;
     SDL_Window* window = nullptr;

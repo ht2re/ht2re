@@ -150,8 +150,14 @@ public:
     bool artLoaded() const { return artLoaded_; }
 
     void open(const std::string& screenName);
-    void close() { active_ = false; }
+    void close() { active_ = false; dock_ = false; }
     bool active() const { return active_; }
+    // The order board is a proximity overlay: it draws and takes OK, and the
+    // truck keeps driving. Every other screen pauses the world.
+    void showDock(const std::string& screenName);
+    void hideDock();
+    bool docked() const { return dock_ && active_; }
+    bool pausesWorld() const { return active_ && !dock_; }
     const std::string& screen() const { return cur_; }
     const Screen* current() const;
     const std::vector<Screen>& screens() const { return screens_; }
@@ -321,6 +327,7 @@ private:
     bool dataDirty_ = true;
     Renderer* renderer_ = nullptr;
     bool active_ = false;
+    bool dock_ = false;          // order board shown by driving up to a window
     bool artLoaded_ = false;
     int sel_ = -1;
     float time_ = 0.0f;

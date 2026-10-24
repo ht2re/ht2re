@@ -211,6 +211,10 @@ private:
     // 4-line message ring, drawn in the strip's pager window).
     void pushMessage(const std::string& text, const std::string& kind);
     void pushScriptMessage(const std::string& key);   // key into GameData::messages
+    // YOU_MADE / LICENCES_EXPIRED carry a printf conversion in Ms.sch.
+    void pushScriptValue(const std::string& key, double value);
+    // Cargo unload: YOU_CAME_%d, the win/lose page and youwin/youlost.
+    void presentDelivery(long paid);
 
     // --- cockpit UI --------------------------------------------------------
     void buildMinimapTexture();

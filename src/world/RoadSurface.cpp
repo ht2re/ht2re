@@ -27,6 +27,8 @@ bool roadMaterial(const std::string& raw, std::string& lower) {
     if (lower.find("fence") != std::string::npos) return false;
     if (lower.find("stolb") != std::string::npos) return false;
     if (lower.find("bridge") != std::string::npos) return false;
+    // A reflection sheet sits on the carriageway and is not a drive surface.
+    if (lower.find("refl") != std::string::npos) return false;
     static const char* kAccept[] = {"road", "troad", "asfalt", "asphalt"};
     for (const char* k : kAccept)
         if (lower.find(k) != std::string::npos) return true;
@@ -383,6 +385,63 @@ bool RoadSurface::heightAt(float x, float z, float ref, float maxDist,
     outDist = 0.0f;
     outVisible = !(topY > outY + 1.0f);
     return true;
+}
+
+bool RoadSurface::closestPoint(float x, float z, float ref, float maxHoriz, float maxVert,
+                               float& outX, float& outZ, float& outY) const {
+    if (tris_.empty() || grid_.nx <= 0 || !(maxHoriz > 0.0f)) return false;
+    const Grid& g = grid_;
+    int x0 = (int)((x - maxHoriz - g.minX) / g.cell);
+    int x1 = (int)((x + maxHoriz - g.minX) / g.cell);
+    int z0 = (int)((z - maxHoriz - g.minZ) / g.cell);
+    int z1 = (int)((z + maxHoriz - g.minZ) / g.cell);
+    if (x0 < 0) x0 = 0;
+    if (z0 < 0) z0 = 0;
+    if (x1 >= g.nx) x1 = g.nx - 1;
+    if (z1 >= g.nz) z1 = g.nz - 1;
+    if (x0 > x1 || z0 > z1) return false;
+    const float maxD2 = maxHoriz * maxHoriz;
+    float bestD2 = maxD2;
+    bool got = false;
+    auto consider = [&](float px, float pz, float py, float d2) {
+        if (d2 > bestD2) return;
+        if (std::fabs(py - ref) > maxVert) return;
+        bestD2 = d2;
+        outX = px;
+        outZ = pz;
+        outY = py;
+        got = true;
+    };
+    auto edge = [&](float ax, float az, float ay, float bx, float bz, float by) {
+        const float ex = bx - ax, ez = bz - az;
+        const float len2 = ex * ex + ez * ez;
+        float u = len2 > 1e-8f ? ((x - ax) * ex + (z - az) * ez) / len2 : 0.0f;
+        if (u < 0.0f) u = 0.0f;
+        if (u > 1.0f) u = 1.0f;
+        const float px = ax + ex * u, pz = az + ez * u;
+        const float dx = x - px, dz = z - pz;
+        consider(px, pz, ay + (by - ay) * u, dx * dx + dz * dz);
+    };
+    for (int bz = z0; bz <= z1; ++bz)
+        for (int bx = x0; bx <= x1; ++bx) {
+            const size_t b = (size_t)bz * g.nx + bx;
+            for (int i = g.firstTriangle[b]; i < g.firstTriangle[b + 1]; ++i) {
+                const Tri& t = tris_[(size_t)g.tri[(size_t)i]];
+                const float e = (t.bx - t.ax) * (t.cz - t.az) - (t.bz - t.az) * (t.cx - t.ax);
+                if (std::fabs(e) < 1e-9f) continue;
+                const float w0 = ((t.bx - x) * (t.cz - z) - (t.bz - z) * (t.cx - x)) / e;
+                const float w1 = ((t.cx - x) * (t.az - z) - (t.cz - z) * (t.ax - x)) / e;
+                const float w2 = 1.0f - w0 - w1;
+                if ((w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
+                    consider(x, z, w0 * t.ay + w1 * t.by + w2 * t.cy, 0.0f);
+                    continue;
+                }
+                edge(t.ax, t.az, t.ay, t.bx, t.bz, t.by);
+                edge(t.bx, t.bz, t.by, t.cx, t.cz, t.cy);
+                edge(t.cx, t.cz, t.cy, t.ax, t.az, t.ay);
+            }
+        }
+    return got;
 }
 
 } // namespace ht2

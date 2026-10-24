@@ -200,12 +200,35 @@ int main(int argc, char** argv) {
               "reward paid once and counted",
               "paid " + std::to_string(paid) + " delivered " + std::to_string(ec.delivered()));
         check(ec.activeJob() == nullptr, "no active job after delivery");
+        check(ec.lastArrival().place == 0 && ec.licences() == 1 && ec.winStreak() == 1,
+              "arriving before the rival grants one hiring licence",
+              "place " + std::to_string(ec.lastArrival().place) + " licences " +
+                  std::to_string(ec.licences()));
+        ec.tick(800.0f);
+        check(ec.licences() == 0 && ec.takeExpiredLicences() == 1,
+              "a hiring licence expires once its 360..719 s mark passes");
     } else {
         check(false, "jobsNear found at least one job at the start position");
     }
 
     ec.init(gd);   // re-init must keep money/delivered
     check(ec.delivered() == 1 && ec.money() > 0, "re-init keeps progress");
+
+    {
+        Economy race;
+        race.setWayNodes(nodes);
+        race.init(gd);
+        std::vector<size_t> rn = race.jobsForPlayer(gd.startPos[0], gd.startPos[1], 1.0e9f);
+        check(!rn.empty() && race.accept(rn[0]), "rival fixture accepts a haul");
+        const Economy::Job rj = race.jobs()[rn[0]];
+        race.tick(rj.distance / Economy::kCruiseMps + 1.0f);
+        check(race.takeRivalNotice(), "the rival's arrival is announced once");
+        long latePaid = 0;
+        check(race.deliver(rj.toX, rj.toZ, 10.0f, &latePaid), "a late unload still pays");
+        check(race.lastArrival().place == 1 && race.licences() == 0 && race.winStreak() == 0,
+              "arriving after the rival grants no licence and clears the streak",
+              "place " + std::to_string(race.lastArrival().place));
+    }
 
     // ---- robustness: missing names must be skipped, never guessed ---------
     {
@@ -271,6 +294,42 @@ int main(int argc, char** argv) {
             if (j.fromNode.empty() || j.toNode.empty()) ++bad;
         check(bad == 0, "every job that survived has both nodes",
               std::to_string(bad) + " without a node");
+    }
+
+    {
+        Economy term;
+        term.setWayNodes(nodes);
+        term.init(gd);
+        int unload = 0, pickup = 0;
+        for (const auto& w : term.windows()) {
+            if (w.unload) { ++unload; check(w.index == 0 && w.job < 0, "window 0 is the delivery bay"); }
+            else ++pickup;
+        }
+        check(unload >= 11 && pickup > unload, "each market has a delivery window and pickup windows",
+              std::to_string(unload) + " delivery, " + std::to_string(pickup) + " pickup");
+        term.tick(19.0f);
+        check(term.postedJobs().empty(), "formOrders waits until the clock passes 20 s");
+        term.tick(1.0f);
+        const auto posted = term.postedJobs();
+        check(!posted.empty(), "after 20 s each pickup window has an offer",
+              std::to_string(posted.size()) + " posted");
+        bool lifeOk = true;
+        for (const auto& w : term.windows()) {
+            if (w.unload) { if (w.job >= 0) lifeOk = false; continue; }
+            if (w.job < 0) continue;
+            const double left = w.expires - 20.0;
+            if (left < 200.0 || left >= 500.0) lifeOk = false;
+            const auto& j = term.jobs()[(size_t)w.job];
+            const float dx = j.fromX - w.x, dz = j.fromZ - w.z;
+            if (dx * dx + dz * dz > 80.0f * 80.0f) lifeOk = false;
+        }
+        check(lifeOk, "an offer lives 200..499 s and leaves from this terminal");
+        const int bought = posted[0];
+        check(term.accept((size_t)bought), "the posted offer can be bought");
+        bool cleared = true;
+        for (const auto& w : term.windows())
+            if (w.job == bought) cleared = false;
+        check(cleared, "buying the offer takes it off the window");
     }
 
     printf("%s\n", failures ? "FAILURES" : "all economy self-tests passed");

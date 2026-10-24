@@ -100,6 +100,12 @@ public:
     // query point.
     bool heightAt(float x, float z, float ref, float maxDist,
                   float& outY, float& outDist, bool& outVisible) const;
+    // Nearest point on a carriageway triangle. Used when a lane sample has
+    // left the asphalt (the shoulder, a junction chord) so the body can be
+    // put back on the surface that is actually drawn. `maxHoriz` is the XZ
+    // search radius, `maxVert` rejects a deck whose height is far from `ref`.
+    bool closestPoint(float x, float z, float ref, float maxHoriz, float maxVert,
+                      float& outX, float& outZ, float& outY) const;
     // Closest point on a non-asphalt ground triangle, for the narrow boundary
     // hand-over where the generated terrain fills gaps between authored patches.
     bool nearestGroundHeight(float x, float z, float ref, float maxDist,

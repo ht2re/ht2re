@@ -911,10 +911,10 @@ void Renderer::beginTraffic(float cx, float cy, float cz, float yawDeg, float pi
     gl.glUniform3f(uFogColor, fogR, fogG, fogB);
     gl.glUniform1f(uAmbient, ambient);
     gl.glUniform1f(uSunAmt, sunAmount);
-    // The cars sit on the asphalt. A small pull toward the camera keeps the
-    // road texture from showing through the body and the wheels.
+    // One depth unit toward the camera, with no slope factor.  A slope factor
+    // at a grazing angle sinks the body under the road texture.
     glEnable(GL_POLYGON_OFFSET_FILL);
-    glPolygonOffset(-1.5f, -6.0f);
+    glPolygonOffset(0.0f, -1.0f);
 }
 
 void Renderer::endTraffic() {
@@ -1067,7 +1067,7 @@ void Renderer::drawVehicleScene(float cx, float cy, float cz, float yawDeg, floa
     gl.glUniform1f(uSunAmt, sunAmount);
     gl.glUniformMatrix4fv(uModel, 1, GL_FALSE, model.m);
     glEnable(GL_POLYGON_OFFSET_FILL);
-    glPolygonOffset(-1.5f, -6.0f);
+    glPolygonOffset(0.0f, -1.0f);
     drawRanges(vvao, vehicleRanges);
     glDisable(GL_POLYGON_OFFSET_FILL);
     Mat4 ident;
@@ -1144,11 +1144,12 @@ void Renderer::quad2DGradient(float x, float y, float w, float h,
     for (int i = 0; i < 6; ++i) sprites.push_back(v[order[i]]);
 }
 
-void Renderer::drawRanges(unsigned targetVao, const std::vector<Range>& ranges) {
+void Renderer::drawRanges(unsigned targetVao, const std::vector<Range>& ranges, bool sceneWinding) {
     // The shipped B3D geometry was authored for Direct3D (clockwise front faces
     // in a left-handed world).  Mirroring the projection flips the on-screen
-    // winding, so the front face becomes counter-clockwise.
-    glFrontFace(mirrorX ? GL_CCW : GL_CW);
+    // winding, so the front face becomes counter-clockwise.  Generated terrain
+    // is the opposite winding and keeps the face the caller set.
+    if (sceneWinding) glFrontFace(mirrorX ? GL_CCW : GL_CW);
     gl.glBindVertexArray(targetVao);
     gl.glActiveTexture(GL_TEXTURE0);
     gl.glUniform1i(uTex, 0);
@@ -1215,11 +1216,13 @@ void Renderer::draw(float cx, float cy, float cz, float yawDeg, float pitchDeg) 
     // camera) is the depth-space half of that; the geometric half is the
     // clearance groundProfile() keeps below the tile surface.
     // Positive offset pushes the terrain sheet away from the camera so the
-    // tile asphalt, drawn next with no offset, wins even at a grazing angle.
-    // A factor of 1 was not enough: the road still flickered as the cab moved.
+    // tile asphalt, drawn next with no offset, wins.  The bias is a fixed
+    // number of depth units.  A slope factor changes with the camera and is
+    // what made the carriageway shimmer.  sceneWinding stays off: this sheet
+    // is authored CCW and the front face was set just above.
     glEnable(GL_POLYGON_OFFSET_FILL);
-    glPolygonOffset(4.0f, 24.0f);
-    drawRanges(vao, rs);
+    glPolygonOffset(0.0f, 4.0f);
+    drawRanges(vao, rs, false);
     glDisable(GL_POLYGON_OFFSET_FILL);
 }
 

@@ -370,9 +370,15 @@ int App::run(const Options& o) {
                 if (state_ == State::Movie) {
                     if (canSkipMovie()) video_.skip();  // any key skips the movie
                 } else if (esc_.active()) {
-                    // Esc goes "back" (sub-screen -> ESC main -> resume driving),
-                    // everything else navigates the open panel
-                    if (e.key.keysym.sym == SDLK_ESCAPE) { escBack_ = true; escSwallowMenu_ = true; }
+                    // The order board is an overlay. Escape still opens the menu;
+                    // every other screen treats Escape as "back".
+                    if (e.key.keysym.sym == SDLK_ESCAPE && esc_.docked()) {
+                        esc_.hideDock();
+                        handleWorldPanelKey(SDLK_ESCAPE);
+                        escSwallowMenu_ = true;
+                    } else if (e.key.keysym.sym == SDLK_ESCAPE) {
+                        escBack_ = true; escSwallowMenu_ = true;
+                    }
                     else esc_.handleKey(e.key.keysym.sym);
                 } else if (e.key.keysym.sym == SDLK_ESCAPE) {
                     // in the world the menu edge comes from Input (Esc is mapped
@@ -1028,6 +1034,37 @@ void App::pushScriptMessage(const std::string& key) {
     pushMessage(cp1251ToUtf8(it->second), "script " + key);
 }
 
+void App::pushScriptValue(const std::string& key, double value) {
+    auto it = gameData_.messages.find(key);
+    if (it == gameData_.messages.end() || it->second.empty()) return;
+    char buf[256];
+    // Ms.sch uses %d for a count (LICENCES_EXPIRED) and %g for money.
+    if (it->second.find("%d") != std::string::npos)
+        snprintf(buf, sizeof buf, it->second.c_str(), (int)value);
+    else
+        snprintf(buf, sizeof buf, it->second.c_str(), value);
+    pushMessage(cp1251ToUtf8(buf), "script " + key);
+}
+
+void App::presentDelivery(long paid) {
+    const Economy::Arrival& a = economy_.lastArrival();
+    const int place = a.place < 0 ? 0 : (a.place > 9 ? 9 : a.place);
+    char key[32];
+    snprintf(key, sizeof key, "YOU_CAME_%d", place);
+    pushScriptValue("YOU_MADE", (double)paid);
+    pushScriptMessage(key);
+    if (audio_.ready())
+        audio_.playGlobal(a.place == 0 ? "youwinSound" : "youlostSound");
+    // Race result pages (0x51f600): a first-place finish with one driver uses
+    // the backdrop stored at race+0x17c (BackWin1). Any later place is a loss.
+    syncEscContext();
+    esc_.open(a.place == 0 ? "win1" : "lose1");
+    if (audio_.ready()) audio_.engineStop();
+    LOG("delivery: place %d, paid %ld, licences +%d (now %d), screen %s",
+        a.place, paid, a.licencesGranted, economy_.licences(),
+        a.place == 0 ? "win1" : "lose1");
+}
+
 
 // AI traffic lives in src/game/Traffic.cpp: the graph is the RSEG network of
 // every .way, the named RNOD nodes are the waypoints/destinations, cars keep to
@@ -1140,38 +1177,56 @@ Mat4 App::trafficRoadPose(const Traffic::Car& c) const {
     const float halfBase = std::max(0.6f, b.halfAxis() * 0.8f);
     const float a = c.yaw * PI / 180.0f, fx = std::sin(a), fz = std::cos(a);
     const float rx = fz, rz = -fx;
+    // The body sits on the asphalt under its centre.  The four wheel columns
+    // are only for pitch and roll, and only when they land on the same deck:
+    // averaging a bridge with the road under it is what left cars in the air.
+    float px = c.x, pz = c.z, py = c.h;
+    float hy = 0.0f, hd = 0.0f;
+    bool vis = false;
+    const bool contained = ground_.roadSurface().heightAt(c.x, c.z, c.h, 4.0f, hy, hd, vis);
+    // A column can hold two carriageways (the deck and the road under it).
+    // heightAt answers the triangle the point is inside, which at a crossing is
+    // often the *other* deck, so a car was lifted onto the bridge or dropped
+    // under it.  Stay with the deck the graph is on: a couple of metres of
+    // grade, not a storey.
+    const float kDeck = 2.5f;
+    if (contained && std::fabs(hy - c.h) <= kDeck) {
+        py = hy;
+    } else {
+        float ox = 0, oz = 0, oy = 0;
+        // The lane sample has left its own carriageway (shoulder, a chord that
+        // cuts the corner, the footprint of the deck above).  Step back onto
+        // that carriageway.  A wider vertical window would accept the other deck.
+        if (ground_.roadSurface().closestPoint(c.x, c.z, c.h, 10.0f, kDeck, ox, oz, oy)) {
+            px = ox; pz = oz; py = oy;
+        } else if (contained && std::fabs(hy - c.h) <= 12.0f) {
+            // Nothing else nearby at the graph height: this triangle is the
+            // only asphalt, and the graph sample is the one that is off.
+            py = hy;
+        } else {
+            // No carriageway in reach.  Use the authored ground only when it
+            // agrees with the graph, so a missing deck does not drop the car
+            // into the valley under the road.
+            int src = -1;
+            const float d = ground_.drivableY(c.x, c.z, c.h, &src, nullptr);
+            if (src == 2 && std::isfinite(d)) py = d;
+            else if (src == 3 && std::isfinite(d) && std::fabs(d - c.h) <= 3.0f) py = d;
+        }
+    }
     const float local[4][2] = {{0,halfBase},{0,-halfBase},{-halfTrack,0},{halfTrack,0}};
     float h[4];
     bool ok[4] = {false, false, false, false};
-    int found = 0;
-    for (int i=0;i<4;++i) {
+    for (int i = 0; i < 4; ++i) {
         float distance; bool visible;
-        ok[i] = ground_.roadSurface().heightAt(c.x+rx*local[i][0]+fx*local[i][1],
-            c.z+rz*local[i][0]+fz*local[i][1], c.h, 12.0f, h[i], distance, visible);
-        if (ok[i]) ++found;
+        const float qx = px + rx * local[i][0] + fx * local[i][1];
+        const float qz = pz + rz * local[i][0] + fz * local[i][1];
+        if (!ground_.roadSurface().heightAt(qx, qz, py, 4.0f, h[i], distance, visible)) continue;
+        if (std::fabs(h[i] - py) > 1.5f) continue;
+        ok[i] = true;
     }
-    if (found == 0) {
-        // No authored asphalt in any of the four columns (junctions, depots, the
-        // gaps between the authored patches).  Fall back to the *same layered
-        // drivable surface* the player's own ride uses instead of the `.way` graph
-        // height: the graph can sit metres above the ground that is actually
-        // drawn there, which is what made cars look like they were in the air.
-        float y = c.h;
-        int src = -1;
-        const float d = ground_.drivableY(c.x, c.z, c.h, &src, nullptr);
-        if (src >= 0 && std::isfinite(d)) y = d;
-        else if (ground_.surfaceOnRoad(c.x, c.z, y)) { /* the `.way` profile answered */ }
-        else if (!ground_.empty() && y == 0.0f) y = ground_.heightAt(c.x, c.z, 0.0f);
-        return Mat4::translation(c.x,y,c.z)*Mat4::rotY(c.yaw);
-    }
-    // Use whatever the four probes did find: a partly off-road car then still sits
-    // on the surface under the wheels instead of on the graph height.
-    float sum = 0.0f;
-    for (int i=0;i<4;++i) if (ok[i]) sum += h[i];
-    const float y = sum / (float)found;
-    const float pitch = (ok[0] && ok[1]) ? std::atan2(h[0]-h[1],2*halfBase) : 0.0f;
-    const float roll  = (ok[2] && ok[3]) ? std::atan2(h[3]-h[2],2*halfTrack) : 0.0f;
-    return Mat4::translation(c.x,y,c.z)*Mat4::rotY(c.yaw)*Mat4::rotX(-pitch)*Mat4::rotZ(roll);
+    const float pitch = (ok[0] && ok[1]) ? std::atan2(h[0] - h[1], 2 * halfBase) : 0.0f;
+    const float roll  = (ok[2] && ok[3]) ? std::atan2(h[3] - h[2], 2 * halfTrack) : 0.0f;
+    return Mat4::translation(px, py, pz) * Mat4::rotY(c.yaw) * Mat4::rotX(-pitch) * Mat4::rotZ(roll);
 }
 
 void App::drawTraffic(float cx, float cy, float cz, float yaw, float pitch) {
@@ -2338,7 +2393,9 @@ void App::escAction(const std::string& act) {
         if (idx >= 0 && (size_t)idx < economy_.jobs().size() &&
             economy_.canCarry(economy_.jobs()[(size_t)idx]) &&
             economy_.accept((size_t)idx)) {
+            if (esc_.docked()) esc_.hideDock();
             const Economy::Job* j = economy_.activeJob();
+            if (audio_.ready()) audio_.playGlobal("orderSound");
             LOG("ui: job accepted: %s -> %s, %.0f m, reward %ld, cargo %s",
                 j ? j->fromTown.c_str() : "?", j ? j->toTown.c_str() : "?",
                 j ? j->distance : 0.0f, j ? j->reward : 0,
@@ -2348,7 +2405,7 @@ void App::escAction(const std::string& act) {
     }
     if (act == "deliverjob") {
         long reward = 0;
-        if (economy_.deliver(vehicle3d_.x(), vehicle3d_.z(), 120.0f, &reward))
+        if (economy_.deliver(vehicle3d_.x(), vehicle3d_.z(), Economy::kWindowRadius, &reward))
             LOG("ui: job delivered, reward %ld, money %ld", reward, economy_.money());
         else LOG("ui: nothing to deliver here");
         return;
@@ -2369,8 +2426,16 @@ void App::escAction(const std::string& act) {
     }
     if (act == "changevehicle") { syncEscContext(); esc_.open("sale"); return; }
     if (act == "hiredriver") {
+        // NO_LICENCES (0x476cda): the hire vector at player+0x90 is empty.
+        // Licences are granted only when a haul is finished in first place.
+        if (economy_.licences() <= 0) {
+            pushScriptMessage("NO_LICENCES");
+            LOG("ui: hire refused, no hiring licences");
+            return;
+        }
         hiredDriver_ = esc_.selectedHireName();
-        LOG("ui: driver hired: %s", hiredDriver_.empty() ? "-" : hiredDriver_.c_str());
+        LOG("ui: driver hired: %s (%d licences)", hiredDriver_.empty() ? "-" : hiredDriver_.c_str(),
+            economy_.licences());
         return;
     }
     if (act == "firedriver") {
@@ -3266,7 +3331,7 @@ void App::drawWorld(float dt, bool interactive) {
     interactivePass_ = interactive;
     // While an ESC screen is up the world is *paused*: no clock, no vehicle, no
     // traffic, no events - only the frozen frame behind the panel.
-    const bool paused = esc_.active();
+    const bool paused = esc_.pausesWorld();
     if (!paused) updateClock(dt);
     applyWeather(dt);
     weatherAnim_ += paused ? 0.0f : (dt > 0.25f ? 0.25f : dt);
@@ -3298,12 +3363,12 @@ void App::drawWorld(float dt, bool interactive) {
                     openPanel("sale");
             }
             if (st.job) {
-                std::vector<size_t> near = economy_.jobsForPlayer(vehicle3d_.x(), vehicle3d_.z(), 120.0f);
-                if (!near.empty()) openPanel("order");
+                // At a pickup window the board is already up: the key buys it.
+                // Otherwise the key opens Справка, the list of posted orders.
+                if (esc_.docked() && esc_.screen() == "order") escAction("acceptjob");
+                else openPanel("info");
             }
-            if (st.deliver) {
-                if (economy_.activeJob()) openPanel("info");
-            }
+            if (st.deliver) openPanel("info");
             if (st.map) {                            // fuel / repair (Tab / Back)
                 if (nearestService(true) >= 0) openPanel("fuel");
                 else if (nearestService(false) >= 0) openPanel("service");
@@ -3320,7 +3385,7 @@ void App::drawWorld(float dt, bool interactive) {
             }
         }
     }
-    if (!esc_.active()) {
+    if (!paused) {
         vehicle3d_.update(in, dt);
 
         // The AI sees the player as a solid, moving leader: it queues behind a
@@ -3347,10 +3412,31 @@ void App::drawWorld(float dt, bool interactive) {
         updateAmbushes();
         updateSpeedCamera(dt);       // speed camera / fine panel
         economy_.tick(dt);           // the job's «ОСТ.ВРЕМЯ» contract clock
+        if (economy_.takeRivalNotice())
+            pushScriptMessage("COMPETITOR_ARRIVED");
+        if (const int expired = economy_.takeExpiredLicences())
+            pushScriptValue("LICENCES_EXPIRED", (double)expired);
+        // Window 0 is the unload bay. loadOrder pays there and, when the place
+        // counter is still 0, grants the hiring licence. Pickup windows are
+        // ~15 m away, so the 10 m radius does not fire on them.
+        const Economy::TerminalWindow bay =
+            economy_.terminalAt(vehicle3d_.x(), vehicle3d_.z());
+        if (bay.unload && economy_.activeJob()) {
+            long reward = 0;
+            if (economy_.deliver(vehicle3d_.x(), vehicle3d_.z(), Economy::kWindowRadius, &reward))
+                presentDelivery(reward);
+        }
+        // Windows 1+ raise the right-hand order board for the offer posted there.
+        if (!bay.unload && bay.job >= 0 && !economy_.activeJob() && !esc_.pausesWorld()) {
+            syncEscContext();
+            esc_.showDock("order");
+        } else if (esc_.docked()) {
+            esc_.hideDock();
+        }
     }
     // Sound follows the world state: listener + engine loop + crash one-shots.
     // Skipped on the frame that leaves the world, so engineStop() is not undone.
-    if (state_ == State::World && !esc_.active()) updateSceneAudio();
+    if (state_ == State::World && !paused) updateSceneAudio();
 
     // AI cars are solid for the player: Traffic::update() already pushed the
     // truck out of every car it touched (applyTrafficHits above); the old
@@ -3514,7 +3600,7 @@ void App::drawWorld(float dt, bool interactive) {
             font_.draw(r_, "F1-F3: HELP  F4: COMPANY  F5: CB RADIO  W/S: THROTTLE  A/D: STEER  SPACE: BRAKE  C/V: VIEW  ESC: MENU",
                        16, (float)r_.height_ - 16, 1.0f, 0.85f, 0.87f, 0.92f, 0.9f);
         }
-    } else if (hud_.loaded()) {
+    } else if (paused && hud_.loaded()) {
         hud_.drawPause(r_);
     }
     r_.end2D();

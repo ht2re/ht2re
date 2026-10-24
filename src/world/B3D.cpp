@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
+#include <map>
 
 namespace ht2 {
 
@@ -575,6 +576,39 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked, int 
         bool isLinkedTarget(const std::string& name) const {
             return !name.empty() && self->links.count(name) != 0;
         }
+        // A container that is both present in the tree and linked onto the same
+        // spot (or linked twice) is emitted twice, byte for byte.  On the road
+        // that is two copies of the same asphalt, and the depth test flips
+        // between them as the camera moves — the carriageway "shakes".
+        std::vector<uint64_t> placed;
+        int dropped = 0;
+        static uint64_t fingerprint(const SubMesh& sm) {
+            uint64_t h = 14695981039346656037ull;
+            auto mix = [&](uint32_t v) { h ^= v; h *= 1099511628211ull; };
+            auto mixStr = [&](const std::string& s) {
+                mix((uint32_t)s.size());
+                for (unsigned char c : s) mix(c);
+            };
+            mixStr(sm.group);
+            mixStr(sm.material);
+            mix((uint32_t)sm.pos.size());
+            mix((uint32_t)sm.uv.size());
+            mix((uint32_t)sm.idx.size());
+            for (float f : sm.pos) { uint32_t u; std::memcpy(&u, &f, 4); mix(u); }
+            for (float f : sm.uv) { uint32_t u; std::memcpy(&u, &f, 4); mix(u); }
+            for (uint32_t i : sm.idx) mix(i);
+            return h;
+        }
+        bool coincident(const SubMesh& sm, uint64_t h) const {
+            for (size_t i = 0; i < placed.size(); ++i) {
+                if (placed[i] != h) continue;
+                const SubMesh& o = self->subs[i];
+                if (o.group == sm.group && o.material == sm.material &&
+                    o.pos == sm.pos && o.uv == sm.uv && o.idx == sm.idx)
+                    return true;
+            }
+            return false;
+        }
 
         void go(const Node& n, int curMesh, const XForm& xf, int depth,
                 const std::string& group = std::string(), int body = -1, int tyre = -1) {
@@ -721,17 +755,104 @@ void B3D::buildFrom(const std::vector<const Node*>& roots, bool skipLinked, int 
                 }
                 float dx = mx[0] - mn[0], dy = mx[1] - mn[1], dz = mx[2] - mn[2];
                 sm.radius = 0.5f * sqrtf(dx * dx + dy * dy + dz * dz);
+                const uint64_t h = fingerprint(sm);
+                if (coincident(sm, h)) { ++dropped; continue; }
+                placed.push_back(h);
                 self->subs.push_back(std::move(sm));
             }
         }
     } w{this, skipLinked, bodyState};
     XForm ident;
     for (const Node* n : roots) w.go(*n, -1, ident, 0);
+    // A show-group often stores the same patch twice: a dense mesh and a coarse
+    // one with the same centre, the same radius and the same material.  Both
+    // were drawn, and on a slope the coarse chords cross the dense surface by
+    // a few centimetres.  At a grazing angle that crossing band is a metre wide
+    // on screen and flips as the camera moves.  The dense mesh is the one to
+    // keep; the coarse one exists only as a distance stand-in, and drawing it
+    // on top of the dense mesh is what shakes the carriageway and the verge.
+    if (bodyState < 0) {
+        std::vector<char> drop(subs.size(), 0);
+        int coarse = 0;
+        for (size_t b = 0; b < subs.size(); ++b) {
+            const SubMesh& B = subs[b];
+            if (B.material.empty() || B.idx.size() < 3) continue;
+            for (size_t a = 0; a < subs.size(); ++a) {
+                if (a == b || drop[a]) continue;
+                const SubMesh& A = subs[a];
+                if (A.material != B.material || A.group != B.group) continue;
+                if (A.idx.size() < B.idx.size() * 2) continue;
+                float dx = A.center[0] - B.center[0];
+                float dz = A.center[1] - B.center[1];
+                float dy = A.center[2] - B.center[2];
+                float lim = std::max(5.0f, 0.08f * A.radius);
+                if (dx * dx + dz * dz > lim * lim || std::fabs(dy) > 2.0f) continue;
+                float rr = A.radius > 1.0f ? B.radius / A.radius : 1.0f;
+                if (rr < 0.85f || rr > 1.15f) continue;
+                // Same sphere is not enough: two neighbouring patches of one
+                // material can share it.  The coarse mesh is a cover only when
+                // its own triangles lie on the dense mesh.  The bbox centre is
+                // the wrong probe — a road ribbon's centre is often off the
+                // asphalt — so this samples the coarse triangles themselves.
+                int samples = 0, hits = 0;
+                const size_t step = std::max<size_t>(3, (B.idx.size() / 3 / 8) * 3);
+                for (size_t bi = 0; bi + 2 < B.idx.size(); bi += step) {
+                    const uint32_t i0 = B.idx[bi], i1 = B.idx[bi + 1], i2 = B.idx[bi + 2];
+                    if ((i0 + 1) * 3 > B.pos.size() || (i1 + 1) * 3 > B.pos.size() ||
+                        (i2 + 1) * 3 > B.pos.size()) continue;
+                    const float qx = (B.pos[i0 * 3] + B.pos[i1 * 3] + B.pos[i2 * 3]) / 3.0f;
+                    const float qz = (B.pos[i0 * 3 + 1] + B.pos[i1 * 3 + 1] + B.pos[i2 * 3 + 1]) / 3.0f;
+                    const float qy = (B.pos[i0 * 3 + 2] + B.pos[i1 * 3 + 2] + B.pos[i2 * 3 + 2]) / 3.0f;
+                    ++samples;
+                    for (size_t ti = 0; ti + 2 < A.idx.size(); ti += 3) {
+                        const uint32_t ia = A.idx[ti], ib = A.idx[ti + 1], ic = A.idx[ti + 2];
+                        if ((ia + 1) * 3 > A.pos.size() || (ib + 1) * 3 > A.pos.size() ||
+                            (ic + 1) * 3 > A.pos.size()) continue;
+                        const float ax = A.pos[ia * 3], az = A.pos[ia * 3 + 1], ay = A.pos[ia * 3 + 2];
+                        const float bx = A.pos[ib * 3], bz = A.pos[ib * 3 + 1], by = A.pos[ib * 3 + 2];
+                        const float cx = A.pos[ic * 3], cz = A.pos[ic * 3 + 1], cy = A.pos[ic * 3 + 2];
+                        const float v0x = bx - ax, v0z = bz - az;
+                        const float v1x = cx - ax, v1z = cz - az;
+                        const float v2x = qx - ax, v2z = qz - az;
+                        const float den = v0x * v1z - v0z * v1x;
+                        if (std::fabs(den) < 1e-4f) continue;
+                        const float v = (v2x * v1z - v2z * v1x) / den;
+                        const float w = (v0x * v2z - v0z * v2x) / den;
+                        const float u = 1.0f - v - w;
+                        if (u < -1e-3f || v < -1e-3f || w < -1e-3f) continue;
+                        const float py = u * ay + v * by + w * cy;
+                        if (std::fabs(py - qy) < 0.5f) { ++hits; break; }
+                    }
+                }
+                if (samples < 1 || hits * 4 < samples * 3) continue;
+                drop[b] = 1;
+                ++coarse;
+                break;
+            }
+        }
+        if (coarse) {
+            std::map<std::string, int> byMat;
+            for (size_t i = 0; i < subs.size(); ++i)
+                if (drop[i]) ++byMat[subs[i].material];
+            std::vector<SubMesh> kept;
+            kept.reserve(subs.size() - (size_t)coarse);
+            for (size_t i = 0; i < subs.size(); ++i)
+                if (!drop[i]) kept.push_back(std::move(subs[i]));
+            subs.swap(kept);
+            std::string hist;
+            for (const auto& kv : byMat) {
+                if (!hist.empty()) hist += " ";
+                hist += kv.first + ":" + std::to_string(kv.second);
+            }
+            LOG("b3d: %d coarse covers dropped (%s)", coarse, hist.c_str());
+        }
+    }
     collectHitProxies();
 
-    LOG("b3d scene%s: %zu submeshes, %d placements, bbox (%.1f %.1f %.1f)..(%.1f %.1f %.1f)",
+    LOG("b3d scene%s: %zu submeshes, %d placements, %d coincident duplicates dropped, "
+        "bbox (%.1f %.1f %.1f)..(%.1f %.1f %.1f)",
         sceneName_.empty() ? "" : (" '" + sceneName_ + "'").c_str(),
-        subs.size(), w.instances, bbMin[0], bbMin[1], bbMin[2], bbMax[0], bbMax[1], bbMax[2]);
+        subs.size(), w.instances, w.dropped, bbMin[0], bbMin[1], bbMin[2], bbMax[0], bbMax[1], bbMax[2]);
 }
 
 // The authored collision proxies: top-level `hit_*` containers hold the shapes the
