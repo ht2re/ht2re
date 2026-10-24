@@ -110,6 +110,9 @@ public:
     // hand-over where the generated terrain fills gaps between authored patches.
     bool nearestGroundHeight(float x, float z, float ref, float maxDist,
                              float& outY, float& outDist) const;
+    // Drop authored grass triangles that lie on the carriageway. The shoulder
+    // outside the road mesh is left alone. `mat_roadgrn` is not grass.
+    void cutGrassOffCarriageway(std::vector<B3D::SubMesh>& meshes) const;
 
 private:
     // Horizontal distance to the nearest road triangle edge (maxDist + 1 when

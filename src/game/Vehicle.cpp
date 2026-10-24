@@ -202,6 +202,13 @@ void Vehicle::setWheelbase(float metres) {
     wheelbase_ = metres;
 }
 
+void Vehicle::setRearAxle(float localZ) {
+    // Mesh +z is forward. A rear axle behind the origin has a negative local z;
+    // the origin then leads that axle by -localZ metres.
+    if (!(localZ < -0.2f) || localZ < -15.0f) return;
+    rearLead_ = -localZ;
+}
+
 double Vehicle::stationLitrePrice(float x, float z, float height) {
     auto dist = [](double px, double pz, double py, float x, float z, float h) {
         const double dx = (double)x - px;
@@ -543,6 +550,15 @@ void Vehicle::update(const Input& in, float dt) {
         yawRate = (yawRate > 0 ? 1.0f : -1.0f) * yawCap;
         latAccel_ = kLateralGrip;
     }
+    // Rear axle tracks the heading it already has. The body then yaws about
+    // that axle, so the rear tyres do not slide sideways the way a yaw about
+    // the model origin does.
+    float fx0, fz0;
+    forward(fx0, fz0);
+    float rx = x_ - fx0 * rearLead_;
+    float rz = z_ - fz0 * rearLead_;
+    rx += fx0 * speed_ * dt;
+    rz += fz0 * speed_ * dt;
     yaw_ += yawRate * 180.0f / PI * dt;
     while (yaw_ > 180.0f) yaw_ -= 360.0f;
     while (yaw_ < -180.0f) yaw_ += 360.0f;
@@ -550,7 +566,9 @@ void Vehicle::update(const Input& in, float dt) {
     // --- integrate position ------------------------------------------------
     float fx, fz;
     forward(fx, fz);
-    float dx = fx * speed_ * dt, dz = fz * speed_ * dt;
+    const float nx = rx + fx * rearLead_;
+    const float nz = rz + fz * rearLead_;
+    float dx = nx - x_, dz = nz - z_;
     // The ground step is still the fallback when no collision module is wired:
     // refuse a move that would climb more than climbLimit.
     blocked_ = false;

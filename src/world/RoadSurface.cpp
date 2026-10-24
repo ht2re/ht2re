@@ -444,4 +444,84 @@ bool RoadSurface::closestPoint(float x, float z, float ref, float maxHoriz, floa
     return got;
 }
 
+void RoadSurface::cutGrassOffCarriageway(std::vector<B3D::SubMesh>& meshes) const {
+    if (tris_.empty()) return;
+    auto lower = [](std::string s) {
+        for (char& c : s) c = (char)tolower((unsigned char)c);
+        return s;
+    };
+    auto onRoad = [&](float x, float z, float y) {
+        float hy = 0.0f, d = 0.0f;
+        bool vis = false;
+        if (!heightAt(x, z, y, 4.0f, hy, d, vis)) return false;
+        return std::fabs(hy - y) < 2.5f;
+    };
+    size_t dropped = 0, kept = 0;
+    for (B3D::SubMesh& sm : meshes) {
+        const std::string name = lower(sm.material);
+        if (name.find("grass") == std::string::npos) continue;
+        if (name.find("road") != std::string::npos) continue;
+        if (sm.idx.size() < 3 || sm.pos.size() < 9) continue;
+        const bool haveNrm = sm.nrm.size() == sm.pos.size();
+        const bool haveUv = sm.uv.size() == (sm.pos.size() / 3) * 2;
+        std::vector<uint32_t> idx;
+        idx.reserve(sm.idx.size());
+        auto mid = [&](uint32_t a, uint32_t b) {
+            const uint32_t n = (uint32_t)(sm.pos.size() / 3);
+            for (int k = 0; k < 3; ++k)
+                sm.pos.push_back(0.5f * (sm.pos[a * 3 + k] + sm.pos[b * 3 + k]));
+            if (haveNrm)
+                for (int k = 0; k < 3; ++k)
+                    sm.nrm.push_back(0.5f * (sm.nrm[a * 3 + k] + sm.nrm[b * 3 + k]));
+            if (haveUv) {
+                sm.uv.push_back(0.5f * (sm.uv[a * 2] + sm.uv[b * 2]));
+                sm.uv.push_back(0.5f * (sm.uv[a * 2 + 1] + sm.uv[b * 2 + 1]));
+            }
+            return n;
+        };
+        auto covered = [&](uint32_t ia, uint32_t ib, uint32_t ic, float& cx, float& cy, float& cz) {
+            const float ax = sm.pos[ia * 3], az = sm.pos[ia * 3 + 1], ay = sm.pos[ia * 3 + 2];
+            const float bx = sm.pos[ib * 3], bz = sm.pos[ib * 3 + 1], by = sm.pos[ib * 3 + 2];
+            const float qx = sm.pos[ic * 3], qz = sm.pos[ic * 3 + 1], qy = sm.pos[ic * 3 + 2];
+            cx = (ax + bx + qx) / 3.0f;
+            cz = (az + bz + qz) / 3.0f;
+            cy = (ay + by + qy) / 3.0f;
+            const int n = (onRoad(ax, az, ay) ? 1 : 0) + (onRoad(bx, bz, by) ? 1 : 0) +
+                          (onRoad(qx, qz, qy) ? 1 : 0);
+            return n;
+        };
+        for (size_t t = 0; t + 2 < sm.idx.size(); t += 3) {
+            const uint32_t ia = sm.idx[t], ib = sm.idx[t + 1], ic = sm.idx[t + 2];
+            if ((size_t)(ia + 1) * 3 > sm.pos.size() || (size_t)(ib + 1) * 3 > sm.pos.size() ||
+                (size_t)(ic + 1) * 3 > sm.pos.size()) {
+                idx.push_back(ia); idx.push_back(ib); idx.push_back(ic);
+                ++kept;
+                continue;
+            }
+            float cx, cy, cz;
+            const int n = covered(ia, ib, ic, cx, cy, cz);
+            const bool midOn = onRoad(cx, cz, cy);
+            if (n == 0 && !midOn) {
+                idx.push_back(ia); idx.push_back(ib); idx.push_back(ic);
+                ++kept;
+                continue;
+            }
+            // Split once. Drop a child only when it sits on the carriageway and
+            // more than 3 m inside the road edge, so the pale texel margin
+            // outside the yellow line stays grass.
+            const uint32_t ab = mid(ia, ib), bc = mid(ib, ic), ca = mid(ic, ia);
+            const uint32_t tri[4][3] = {{ia, ab, ca}, {ab, ib, bc}, {ca, bc, ic}, {ab, bc, ca}};
+            for (int k = 0; k < 4; ++k) {
+                float sx, sy, sz;
+                covered(tri[k][0], tri[k][1], tri[k][2], sx, sy, sz);
+                if (onRoad(sx, sz, sy) && nearestEdgeDist(sx, sz, 8.0f) > 3.0f) { ++dropped; continue; }
+                idx.push_back(tri[k][0]); idx.push_back(tri[k][1]); idx.push_back(tri[k][2]);
+                ++kept;
+            }
+        }
+        sm.idx.swap(idx);
+    }
+    if (dropped) LOG("road: cut %zu grass triangles off the carriageway (%zu kept)", dropped, kept);
+}
+
 } // namespace ht2

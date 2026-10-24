@@ -230,6 +230,10 @@ static void materialColor(const std::string& mat, float rgb[3]) {
     if (s == "mat_tl_s" || s == "mat_tl_b")          { set(0.10f, 0.10f, 0.11f); return; }
     if (s.rfind("mat_tl", 0) == 0)                   { set(0.12f, 0.12f, 0.13f); return; }
     if (has(s, "svet") || has(s, "light") || has(s, "lamp")) { set(0.95f, 0.92f, 0.70f); return; }
+    // Untextured sign board. The frame materials are poster/back; a missing
+    // texture must stay a solid blue board, not a hashed colour or the pole grey.
+    if (has(s, "poster") || has(s, "mat_back") || has(s, "_back"))
+                                                     { set(0.10f, 0.28f, 0.72f); return; }
     if (has(s, "post") || has(s, "stolb") || has(s, "opora")) { set(0.55f, 0.55f, 0.57f); return; }
     if (has(s, "forest") || has(s, "tree"))          { set(0.22f, 0.36f, 0.18f); return; }
     if (has(s, "water"))                             { set(0.16f, 0.34f, 0.52f); return; }
@@ -680,12 +684,72 @@ bool Renderer::buildFineGroundMesh() {
     for (const TVert& v : verts) { ymin = std::min(ymin, v.y); ymax = std::max(ymax, v.y); }
     std::vector<unsigned> idx;
     idx.reserve((size_t)(NX - 1) * (NZ - 1) * 6);
+    const RoadSurface* road = (g && !g->roadSurface().empty()) ? &g->roadSurface() : nullptr;
+    auto onAsphalt = [&](float x, float y, float z) {
+        if (!road) return false;
+        float hy = 0.0f, dist = 0.0f;
+        bool vis = false;
+        if (!road->heightAt(x, z, y, 4.0f, hy, dist, vis)) return false;
+        return std::fabs(hy - y) < 3.0f;
+    };
+    auto mix4 = [](float A, float B, float C, float D, float u, float v) {
+        const float ab = A + (B - A) * u;
+        const float cd = C + (D - C) * u;
+        return ab + (cd - ab) * v;
+    };
     for (int j = 0; j + 1 < NZ; ++j)
         for (int i = 0; i + 1 < NX; ++i) {
             unsigned a = j * NX + i, b = a + 1, c = a + NX, d = c + 1;
-            // x grows with i and z grows with j -> CCW seen from above is (a,b,c)
-            idx.push_back(a); idx.push_back(b); idx.push_back(c);
-            idx.push_back(b); idx.push_back(d); idx.push_back(c);
+            // Copies: a road cell appends vertices and would invalidate references.
+            const TVert va = verts[a];
+            const TVert vb = verts[b];
+            const TVert vc = verts[c];
+            const TVert vd = verts[d];
+            const float mx = 0.25f * (va.x + vb.x + vc.x + vd.x);
+            const float my = 0.25f * (va.y + vb.y + vc.y + vd.y);
+            const float mz = 0.25f * (va.z + vb.z + vc.z + vd.z);
+            const bool touch = onAsphalt(va.x, va.y, va.z) || onAsphalt(vb.x, vb.y, vb.z) ||
+                               onAsphalt(vc.x, vc.y, vc.z) || onAsphalt(vd.x, vd.y, vd.z) ||
+                               onAsphalt(mx, my, mz);
+            if (!touch) {
+                // x grows with i and z grows with j -> CCW seen from above is (a,b,c)
+                idx.push_back(a); idx.push_back(b); idx.push_back(c);
+                idx.push_back(b); idx.push_back(d); idx.push_back(c);
+                continue;
+            }
+            // 16 m cells stride across the asphalt. Drop a subquad only when
+            // every corner is on the carriageway, so the shoulder stays grass
+            // and a cell that merely crosses the white line is not a hole.
+            const int N = 8;
+            for (int sj = 0; sj < N; ++sj)
+                for (int si = 0; si < N; ++si) {
+                    const float u0 = (float)si / N, u1 = (float)(si + 1) / N;
+                    const float v0 = (float)sj / N, v1 = (float)(sj + 1) / N;
+                    auto at = [&](float u, float v) {
+                        TVert p{};
+                        p.x = mix4(va.x, vb.x, vc.x, vd.x, u, v);
+                        p.y = mix4(va.y, vb.y, vc.y, vd.y, u, v);
+                        p.z = mix4(va.z, vb.z, vc.z, vd.z, u, v);
+                        p.u = mix4(va.u, vb.u, vc.u, vd.u, u, v);
+                        p.v = mix4(va.v, vb.v, vc.v, vd.v, u, v);
+                        p.nx = mix4(va.nx, vb.nx, vc.nx, vd.nx, u, v);
+                        p.ny = mix4(va.ny, vb.ny, vc.ny, vd.ny, u, v);
+                        p.nz = mix4(va.nz, vb.nz, vc.nz, vd.nz, u, v);
+                        p.r = mix4(va.r, vb.r, vc.r, vd.r, u, v);
+                        p.g = mix4(va.g, vb.g, vc.g, vd.g, u, v);
+                        p.b = mix4(va.b, vb.b, vc.b, vd.b, u, v);
+                        return p;
+                    };
+                    const TVert p00 = at(u0, v0), p10 = at(u1, v0), p01 = at(u0, v1), p11 = at(u1, v1);
+                    if (onAsphalt(p00.x, p00.y, p00.z) && onAsphalt(p10.x, p10.y, p10.z) &&
+                        onAsphalt(p01.x, p01.y, p01.z) && onAsphalt(p11.x, p11.y, p11.z))
+                        continue;
+                    const unsigned base = (unsigned)verts.size();
+                    verts.push_back(p00); verts.push_back(p10);
+                    verts.push_back(p01); verts.push_back(p11);
+                    idx.push_back(base); idx.push_back(base + 1); idx.push_back(base + 2);
+                    idx.push_back(base + 1); idx.push_back(base + 3); idx.push_back(base + 2);
+                }
         }
     // The shipped ENV/*.b3d tiles already contain the complete textured road
     // surface.  The old fallback ribbon duplicated it at heights sampled from
@@ -884,7 +948,8 @@ size_t Renderer::trafficTriangles() const {
     return n;
 }
 
-void Renderer::beginTraffic(float cx, float cy, float cz, float yawDeg, float pitchDeg) {
+void Renderer::beginTraffic(float cx, float cy, float cz, float yawDeg, float pitchDeg,
+                            bool twoSided) {
     if (!prog) return;
     // A traffic instance is placed by its own model matrix, so its ranges live
     // in *model* space and must not go through the world-space range cull (that
@@ -901,7 +966,7 @@ void Renderer::beginTraffic(float cx, float cy, float cz, float yawDeg, float pi
     Mat4 proj = Mat4::perspective(60.0f, (float)renderW_ / (float)renderH_, nearPlane, farPlane());
     if (mirrorX) proj.m[0] = -proj.m[0];        // Direct3D -> OpenGL orientation
     Mat4 view = Mat4::lookAt(cx, cy, cz, tx, ty, tz);
-    if (culling) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+    if (culling && !twoSided) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
     gl.glUseProgram(prog);
     gl.glUniformMatrix4fv(uProj, 1, GL_FALSE, proj.m);
     gl.glUniformMatrix4fv(uView, 1, GL_FALSE, view.m);

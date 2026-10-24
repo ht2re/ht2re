@@ -908,7 +908,7 @@ static void modelBody(const std::vector<B3D::SubMesh>& subs, float& length, floa
 // Front-axle to rearmost-axle span of the assembled body, from the wheel
 // meshes.  The ZIL span is 7.90 m — the constant Vehicle was measured with.
 // A bought car must not keep that lorry wheelbase.
-static float axleSpan(const std::vector<B3D::SubMesh>& subs) {
+static float axleSpan(const std::vector<B3D::SubMesh>& subs, float* rearLocalZ = nullptr) {
     std::vector<float> zc;
     for (const auto& sm : subs) {
         std::string m = sm.material;
@@ -931,6 +931,8 @@ static float axleSpan(const std::vector<B3D::SubMesh>& subs) {
         else axles.back() = 0.5f * (axles.back() + z);
     }
     if (axles.size() < 2) return 0.0f;
+    // axles are sorted by local +z. The smallest is the rearmost axle.
+    if (rearLocalZ) *rearLocalZ = axles.front();
     return axles.back() - axles.front();
 }
 
@@ -1159,8 +1161,12 @@ void App::refreshPlayerBody() {
                 lo=std::min(lo,sm.pos[i]); hi=std::max(hi,sm.pos[i]);
             }
         if (hi>=lo) vehicle3d_.setCollisionHeight(hi-lo);
-        const float span = axleSpan(trucks_.submeshes());
-        if (span > 1.0f) vehicle3d_.setWheelbase(span);
+        float rearZ = 0.0f;
+        const float span = axleSpan(trucks_.submeshes(), &rearZ);
+        if (span > 1.0f) {
+            vehicle3d_.setWheelbase(span);
+            vehicle3d_.setRearAxle(rearZ);
+        }
     }
     LOG("traffic: player body %.2f x %.2f m, axle span %.2f m", (double)playerLength_,
         (double)(2.0f * playerRadius_), (double)vehicle3d_.wheelbase());
@@ -1326,7 +1332,9 @@ void App::drawPlayerWheels(float cx, float cy, float cz, float yaw, float pitch)
 void App::drawTraffic(float cx, float cy, float cz, float yaw, float pitch) {
     const std::vector<Traffic::Car>& cars = traffic_.cars();
     if (cars.empty()) return;
-    r_.beginTraffic(cx, cy, cz, yaw, pitch);
+    // Body panels are one winding (the Gazelle loses a flank under GL cull).
+    // Wheels drawn in this pass are two-sided as well; the world is not.
+    r_.beginTraffic(cx, cy, cz, yaw, pitch, true);
     for (const auto& c : cars) {
         int batch = -1;
         if (c.model >= 0 && c.model < (int)trafficYOff_.size()) {
@@ -1341,12 +1349,10 @@ void App::drawTraffic(float cx, float cy, float cz, float yaw, float pitch) {
         if (c.model >= 0 && c.model < (int)trafficYOff_.size())
             m = m * Mat4::translation(0,trafficYOff_[(size_t)c.model],0);
         r_.drawTrafficInstance(batch, m);
-        // Spin follows metres travelled on the edge.  Traffic::Car has no
-        // separate steer angle (the body yaw already follows the lane), so
-        // the AI tyres roll and stay straight.  The player's front axle
-        // steers in drawPlayerWheels.
+        // Spin follows metres travelled. Front wheels take the steer that
+        // produces this frame's yaw rate; the rear axle stays straight.
         if (c.model >= 0 && c.model < (int)trafficWheels_.size())
-            drawWheelVis(trafficWheels_[(size_t)c.model], m, -c.s / 0.5f, 0.0f);
+            drawWheelVis(trafficWheels_[(size_t)c.model], m, -c.s / 0.5f, c.wheelSteer);
     }
     r_.endTraffic();
 }
@@ -2113,6 +2119,7 @@ void App::loadWorldTiles() {
         // warehouse: the carriageway runs to z = -4575, the network stops at
         // -4615) and over unmapped aprons/depots.
         ground_.buildRoadSurface(worldMeshes_);
+        ground_.roadSurface().cutGrassOffCarriageway(worldMeshes_);
     }
     LOG("app: world = %zu tiles, %zu submeshes", files.size(), total);
 }

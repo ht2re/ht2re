@@ -80,7 +80,10 @@ public:
     size_t trafficModelCount() const { return batches.size(); }
     size_t trafficTriangles() const;
     // camera setup for a traffic pass, then one call per instance
-    void beginTraffic(float camX, float camY, float camZ, float yawDeg, float pitchDeg);
+    // twoSided: traffic body shells are single-sided (the Gazelle's flank is one
+    // winding). The world pass stays culled; only this instance pass opens.
+    void beginTraffic(float camX, float camY, float camZ, float yawDeg, float pitchDeg,
+                      bool twoSided = false);
     void endTraffic();
     void drawTrafficInstance(int model, const Mat4& m);
     // Traffic instances submitted / rejected by the view-distance cull since the

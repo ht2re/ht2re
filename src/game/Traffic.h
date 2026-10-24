@@ -45,6 +45,7 @@ public:
     struct Car {
         float x = 0, z = 0, h = 0;   // world position (h = height)
         float yaw = 0;               // degrees, same convention as Vehicle
+        float wheelSteer = 0;        // front-axle visual steer, degrees
         float speed = 14.0f;         // m/s
         int model = 0;               // index into the model list (setModels)
         std::string dest;            // destination waypoint name ("" = ambient)
@@ -254,7 +255,10 @@ private:
                 float& fx, float& fz) const;
     // Heading (degrees) of an edge when travelled in `dir`, at arclength `s`.
     float headingAt(int edge, int dir, float s) const;
-    void refreshPose(Car& c);
+    // yawDt < 0 snaps the body onto the road tangent (placement).
+    // yawDt == 0 keeps the heading and only refreshes the lane position.
+    // yawDt > 0 slews the heading toward the tangent at the bicycle yaw rate.
+    void refreshPose(Car& c, float yawDt = -1.0f);
     // Rounded lane corner: the heading and the height are blended with the
     // incoming / outgoing edge over the junction window (see docs/traffic_ai.md
     // 3/6).  `wPrev`/`wNext` are the two blend weights (0..0.5).
@@ -281,7 +285,16 @@ private:
     void resolveContacts();
     // The player as a stopped / slow leader for `c` (returns a speed cap).
     float playerLeaderCap(const Car& c, float& fx, float& fz) const;
-    float laneFor(const Edge& e) const { return std::min(laneOffset_, e.width / 3.0f); }
+    // Centre of the right-hand lane. `width` is the whole carriageway (the way
+    // log's w=8 is both directions), so each flow sits a quarter of the width
+    // off the centreline and the two headings do not share one XZ.
+    float laneFor(const Edge& e) const {
+        float lane = e.width * 0.25f;
+        if (!(lane >= 1.0f)) lane = 1.0f;
+        const float fit = e.width * 0.5f - 1.3f;
+        if (fit > 1.0f && lane > fit) lane = fit;
+        return lane;
+    }
 
     std::vector<Vertex> verts_;
     std::vector<Edge> edges_;

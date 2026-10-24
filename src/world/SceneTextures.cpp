@@ -179,6 +179,30 @@ unsigned SceneTextures::textureFor(const std::string& material, const std::strin
         {"reflroad", "reflr"}, {"graviroad", "gravii"},
     };
     for (auto& a : kAlias) if (key == a.from) { auto j = map_.find(a.to); if (j != map_.end()) return j->second; }
+    auto lookup = [&](const std::string& name) -> unsigned {
+        if (!tile.empty()) {
+            auto q = map_.find(tile + "/" + name);
+            if (q != map_.end()) return q->second;
+        }
+        auto j = map_.find(name);
+        return j == map_.end() ? 0u : j->second;
+    };
+    // Direction boards. mat_poster_tile / mat_poster_ugol are the frame strips
+    // (post_tile.txr, post_ugol.txr). mat_post_<town> is the inscription face
+    // (town_<town>.txr). The 4-character prefix below bound every post* name to
+    // whichever of those textures hashed first, so the frame wore the letters.
+    if (key == "postertile") {
+        if (unsigned t = lookup("posttile")) return t;
+    } else if (key == "posterugol") {
+        if (unsigned t = lookup("postugol")) return t;
+    } else if (key.size() > 4 && key.compare(0, 4, "post") == 0 &&
+               key.compare(0, 6, "poster") != 0) {
+        if (unsigned t = lookup("town" + key.substr(4))) return t;
+    }
+    const bool signFamily = key.compare(0, 4, "post") == 0 || key.compare(0, 4, "town") == 0 ||
+                            key.compare(0, 4, "back") == 0 || key.compare(0, 3, "zno") == 0 ||
+                            key.compare(0, 4, "zone") == 0 || key.compare(0, 4, "zend") == 0;
+    if (signFamily) return 0;
     // prefix fallback (e.g. house7 -> house7 absent, use house6)
     for (auto& kv : map_)
         if (kv.first.size() >= 4 && key.size() >= 4 &&

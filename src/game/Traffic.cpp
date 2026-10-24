@@ -61,7 +61,6 @@ constexpr float kDeadEndDist   = 140.0f;  // m, turn around at a dead end beyond
 constexpr float kVertexZone    = 5.0f;    // m, junction conflict radius (bumper to vertex)
 constexpr float kVertexMargin  = 1.0f;    // m, a waiting car keeps its bumper this far out
 constexpr float kMaxSepStep    = 0.6f;    // m/frame, cap on the contact separation
-constexpr float kNarrowPass    = 0.1f;    // m, slack of the "too narrow to pass" test
 constexpr float kPi            = 3.14159265358979f;
 
 // The fastest speed from which the car can still stop inside `gap` metres of
@@ -525,7 +524,7 @@ float Traffic::blendedHeading(const Car& c, float raw) const {
     return h;
 }
 
-void Traffic::refreshPose(Car& c) {
+void Traffic::refreshPose(Car& c, float yawDt) {
     if (c.edge < 0 || c.edge >= (int)edges_.size()) return;
     const Edge& e = edges_[c.edge];
     if (c.s < 0.0f) c.s = 0.0f;
@@ -556,8 +555,38 @@ void Traffic::refreshPose(Car& c) {
         sample(c.nextEdge, c.nextDir, 0.0f, x, nh, z, nf, nf);
         h += wNext * (nh - hC);
     }
-    c.yaw = head;
     c.h = h;
+    if (yawDt < 0.0f) {
+        c.yaw = head;
+        c.wheelSteer = 0.0f;
+    } else if (yawDt > 0.0f) {
+        // The centre stays on the lane. The body yaws toward the tangent at
+        // v*tan(lock)/wheelbase, so a bend is an arc instead of a new heading
+        // assigned every frame. Front wheels show the steer that produces it.
+        const Body b = bodyOf(c.model);
+        const float L = std::max(2.2f, b.length * 0.62f);
+        const float v = std::max(0.5f, std::fabs(c.speed));
+        const float maxRateDeg = v * std::tan(38.0f * kPi / 180.0f) / L * (180.0f / kPi);
+        float err = shortAngle(head - c.yaw);
+        // A freshly placed car (yaw still 0, road not along +z) would otherwise
+        // spend seconds crabbing across the lane. Snap only that case.
+        if (std::fabs(c.yaw) < 0.01f && std::fabs(err) > 20.0f && std::fabs(c.wheelSteer) < 0.01f) {
+            c.yaw = head;
+            err = 0.0f;
+        }
+        const float step = maxRateDeg * yawDt;
+        float applied = err;
+        if (applied > step) applied = step;
+        if (applied < -step) applied = -step;
+        c.yaw += applied;
+        while (c.yaw > 180.0f) c.yaw -= 360.0f;
+        while (c.yaw < -180.0f) c.yaw += 360.0f;
+        const float yawRate = applied * kPi / 180.0f / yawDt;
+        float steer = std::atan(yawRate * L / v) * 180.0f / kPi;
+        if (steer > 38.0f) steer = 38.0f;
+        if (steer < -38.0f) steer = -38.0f;
+        c.wheelSteer = steer;
+    }
     // The renderer mirrors projection X to preserve the original D3D world;
     // its right-of-travel vector is (fz, -fx), not the unmirrored GL normal.
     // Keep the lane's perpendicular distance when rotating its normal through
@@ -565,7 +594,12 @@ void Traffic::refreshPose(Car& c) {
     c.lane = laneFor(e);
     const float hr = head * kPi / 180.0f;
     const float alignment = std::max(0.5f, std::cos(shortAngle(head - raw) * kPi / 180.0f));
-    const float off = c.lane / alignment + c.shift;
+    // Stay in the right-hand lane. A contact may nudge, but not across the
+    // centreline and not past the carriageway edge onto the verge.
+    const float outer = std::max(c.lane, e.width * 0.5f - 1.15f);
+    float off = c.lane / alignment + c.shift;
+    if (off > outer) off = outer;
+    if (off < 0.35f) off = 0.35f;
     c.x += std::cos(hr) * off;
     c.z -= std::sin(hr) * off;
 }
@@ -627,19 +661,17 @@ void Traffic::newDestination(Car& c, float x, float z) {
 // ---------------------------------------------------------------------------
 // spawning / recycling
 // ---------------------------------------------------------------------------
-// Occupancy of an entry zone is measured in the *entry frame*: a car on the
-// same edge but travelling the other way sits at `len - o.s` from the entry
-// vertex, so oncoming traffic blocks an entry exactly like traffic ahead.
+// Occupancy of an entry zone is only the same lane. The opposite direction has
+// its own lateral offset and must pass; mirroring its s onto this lane made
+// two oncoming streams refuse the vertex and stop nose-to-nose.
 bool Traffic::entryBlocked(int edge, int dir, float s, const Car* self) const {
-    // A car may only enter an edge when its entry zone holds nobody: without
-    // this, queues crossing a junction in the same tick pile up at s = 0 and
-    // deadlock (the no-overlap clamp cannot push a car back past the vertex).
+    // A car may only enter an edge when its own lane's entry zone holds nobody:
+    // without this, queues crossing a junction in the same tick pile up at s = 0
+    // and deadlock (the no-overlap clamp cannot push a car back past the vertex).
     if (edge < 0 || edge >= (int)edges_.size()) return true;
-    const float len = edges_[edge].len;
     for (const Car& o : cars_) {
-        if (&o == self || o.edge != edge) continue;
-        const float os = (o.dir == dir) ? o.s : (len - o.s);
-        const float d = os - s;
+        if (&o == self || o.edge != edge || o.dir != dir) continue;
+        const float d = o.s - s;
         const float clearance = self
             ? 0.5f * (bodyOf(self->model).length + bodyOf(o.model).length)
             : bodyOf(o.model).length;
@@ -660,11 +692,9 @@ bool Traffic::worldClear(float x, float z, const Car* self, float minDist) const
 
 bool Traffic::occupied(int edge, int dir, float s, float minGap) const {
     if (edge < 0 || edge >= (int)edges_.size()) return true;
-    const float len = edges_[edge].len;
     for (const Car& o : cars_) {
-        if (o.edge != edge) continue;
-        const float os = (o.dir == dir) ? o.s : (len - o.s);
-        if (std::fabs(os - s) < minGap) return true;
+        if (o.edge != edge || o.dir != dir) continue;
+        if (std::fabs(o.s - s) < minGap) return true;
     }
     return false;
 }
@@ -678,6 +708,11 @@ bool Traffic::vertexBusy(int v, const Car* self, float zone) const {
     if (v < 0 || v >= (int)verts_.size()) return false;
     for (const Car& o : cars_) {
         if (&o == self) continue;
+        // The other lane of this road passes the same vertex. It is not a
+        // crossing, so it must not hold the junction for this direction.
+        if (self && o.edge == self->edge && o.dir != self->dir) continue;
+        if (self && self->nextEdge >= 0 && o.edge == self->nextEdge &&
+            o.dir != self->nextDir) continue;
         const float reach = zone + 0.5f * bodyOf(o.model).length;
         if (!sameLevel(o.h, heightOf(o.model), verts_[v].h,
                        self ? heightOf(self->model) : 1.8f)) continue;
@@ -1075,23 +1110,18 @@ void Traffic::resolveContacts() {
             const float reach = 0.5f * (ba.length + bb.length) + 1.0f;
             if (dist2(A.x, A.z, B.x, B.z) > reach * reach) continue;
             float nx = 0.0f, nz = 0.0f;
-            // Oncoming traffic on a road narrower than the two bodies is let
-            // through (the lanes overlap physically; the original does the same
-            // rather than deadlocking on every narrow street).  The same holds
-            // for two *different* edges that the shipped data draws on top of
-            // each other (shallow merges): no shove can separate them without
-            // pushing both cars off the tarmac, so they pass.
+            // Each direction has its own lane. An oncoming car blocks only the
+            // lane ahead of it, never the opposite one: no shove (that pushed
+            // both bodies onto the verge) and no impulse (that stopped them
+            // nose-to-nose). The same pass applies when two edges are drawn on
+            // top of each other and the cars are already side by side.
             {
-                const float sep = (A.edge == B.edge)
-                    ? 2.0f * laneFor(edges_[A.edge])
-                    : std::min(distanceToEdge(B.edge, A.x, A.z),
-                               distanceToEdge(A.edge, B.x, B.z));
                 const float afx = std::sin(A.yaw * kPi / 180.0f), afz = std::cos(A.yaw * kPi / 180.0f);
                 const float bfx = std::sin(B.yaw * kPi / 180.0f), bfz = std::cos(B.yaw * kPi / 180.0f);
                 const float facing = afx * bfx + afz * bfz;
-                if (sep + kNarrowPass < ba.radius + bb.radius && facing < -0.7f) continue;
-                if (A.edge == B.edge && A.dir != B.dir &&
-                    sep + kNarrowPass < ba.radius + bb.radius) continue;
+                const float lat = std::fabs((B.x - A.x) * afz - (B.z - A.z) * afx);
+                if (A.edge == B.edge && A.dir != B.dir) continue;
+                if (facing < -0.5f && lat > 1.5f) continue;
             }
             const float overlap = Collision::bodyOverlap(A.x, A.z, A.yaw, ba, B.x, B.z, B.yaw, bb, nx, nz);
             const float gap = -overlap;                    // surface distance
@@ -1359,7 +1389,7 @@ void Traffic::update(float dt, float px, float pz, float radius) {
     // cross-edge shove can never leave two cars of the same lane overlapping.
     // Integration has changed s/edge/dir. Test this tick's pose, not the stale
     // coordinates from the previous frame (especially at crossings/ramps).
-    for (Car& c : cars_) refreshPose(c);
+    for (Car& c : cars_) refreshPose(c, 0.0f);
     resolveContacts();
 
     // --- hard no-overlap pass (front to back within each edge/dir) ----------
@@ -1380,7 +1410,7 @@ void Traffic::update(float dt, float px, float pz, float radius) {
             c.s = holdS_[i] + kMaxSepStep;
             if (c.speed > 0.0f) c.speed = 0.0f;
         }
-        refreshPose(c);
+        refreshPose(c, dt);
 
         if (c.destVertex >= 0) {
             const float d = dist2(c.x, c.z, verts_[c.destVertex].x, verts_[c.destVertex].z);

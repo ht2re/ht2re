@@ -198,6 +198,9 @@ public:
     // App replaces it with the span of the loaded body's wheel meshes.
     float wheelbase() const { return wheelbase_; }
     void setWheelbase(float metres);
+    // Local +z of the rear axle (b3d, behind the origin). The bicycle step
+    // then moves that axle along the heading and swings the body about it.
+    void setRearAxle(float localZ);
     float tankLitres() const { return tankLitres_; }
     // record+0x11c when the shipped area is positive; otherwise the mass proxy.
     static float frontalArea(float bodySquare, float mass);
@@ -286,6 +289,9 @@ private:
     bool haveSpec_ = false;
     float cargoMass_ = 0.0f;
     float wheelbase_ = WHEELBASE;
+    // Metres the origin sits ahead of the rear axle. Default is the midpoint
+    // of the ZIL constant; refreshPlayerBody overwrites it from the mesh.
+    float rearLead_ = WHEELBASE * 0.5f;
     float tankLitres_ = 200.0f;
     float omega_ = 0.0f;        // engine angular velocity, rad/s
     int gear_ = 0;              // 0 = N, -1 = R, 1.. gearCount
